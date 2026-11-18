@@ -1,0 +1,12 @@
+﻿QUIZBOO
+
+1. Cài Node.js 22 trở lên và npm.
+2. Mở PowerShell trong thư mục dự án.
+3. npm.cmd ci
+4. Nếu chưa có wrangler.jsonc, chạy:
+   Copy-Item wrangler.example.jsonc wrangler.jsonc
+5. npm.cmd run db:local
+6. npm.cmd run dev
+7. Mở URL Wrangler in ra, thường là http://localhost:8787.
+
+Xem README.md để biết cách triển khai lên Cloudflare và thêm ảnh hoặc video.

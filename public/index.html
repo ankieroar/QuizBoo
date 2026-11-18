@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#221b5a" />
+  <meta name="description" content="Tạo phòng quiz troll, đáp án ẩn, media và bảng xếp hạng trực tuyến." />
+  <title>QuizBoo — Troll Quiz Live</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/style.css" />
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div class="page-glow glow-a" aria-hidden="true"></div><div class="page-glow glow-b" aria-hidden="true"></div>
+  <header class="topnav wrap">
+    <a class="brand" href="/" aria-label="QuizBoo trang chủ"><span class="brand-icon">✳</span><span>quiz<span class="brand-em">boo!</span></span></a>
+    <span class="nav-tag"><span class="dot"></span> QUIZ ROOM · LIVE</span>
+    <button class="nav-back" id="top-home" type="button" hidden>← Trang chủ</button>
+  </header>
+  <main class="wrap">
+    <section id="home" class="view">
+      <div class="hero">
+        <div class="hero-copy">
+          <span class="eyebrow"><span class="spark">✦</span> A LITTLE CHAOS. A LOT OF FUN.</span>
+          <h1>Quiz vui thôi,<br><em>đừng tin đáp án.</em><span class="scribble">↝</span></h1>
+          <p>Trò chơi trắc nghiệm có plot twist. Chơi cùng bạn bè theo mã phòng và theo dõi bảng xếp hạng trực tiếp.</p>
+          <div class="hero-pills"><span>✦ 2–8 lựa chọn</span><span>◈ Ảnh · GIF · Video</span><span>♛ BXH trực tiếp</span></div>
+        </div>
+        <div class="hero-art" aria-hidden="true">
+          <div class="art-sticker art-star">✦</div>
+          <div class="art-card card-back"><span>❔</span><b>Wait, what?</b></div>
+          <div class="art-card card-front"><div class="art-face">◕‿◕</div><strong>GOTCHA!</strong><small>Không phải A, B, C hay D 😈</small></div>
+          <div class="art-label">100% UNPREDICTABLE</div>
+        </div>
+      </div>
+      <div class="home-grid">
+        <section class="entry-card card-create">
+          <span class="mini-icon violet">✧</span><div class="tiny-label">DÀNH CHO QUẢN TRÒ</div>
+          <h2>Tạo một cuộc vui.</h2><p>Soạn hoặc nhập bộ câu hỏi, tùy chỉnh ảnh và mở phòng ngay.</p>
+          <button type="button" id="go-editor" class="button primary full">Tạo phòng quiz <span>↗</span></button>
+          <button type="button" id="go-sample" class="button subtle full">Khám phá quiz mẫu →</button>
+        </section>
+        <section class="entry-card card-join">
+          <span class="mini-icon lime">⌗</span><div class="tiny-label">DÀNH CHO NGƯỜI CHƠI</div>
+          <h2>Vào room nào!</h2><p>Nhập mã phòng từ quản trò. Không cần tài khoản, không phải cài app.</p>
+          <form id="join-form">
+            <label for="join-name" class="field-label">Tên hiển thị</label><input id="join-name" maxlength="24" placeholder="Ví dụ: Trùm đoán mò" required autocomplete="nickname" />
+            <label for="join-code" class="field-label">Mã phòng 6 ký tự</label><input id="join-code" maxlength="6" placeholder="VD: BK7P2M" class="code-input" required autocomplete="off" />
+            <button type="submit" class="button dark full">Vào chơi ngay <span>→</span></button>
+          </form>
+        </section>
+      </div>
+      <section class="entry-card saved-rooms" aria-labelledby="saved-rooms-heading">
+        <h2 id="saved-rooms-heading">Phòng đã tạo</h2>
+        <form id="account-form" class="account-form">
+          <div><label class="field-label" for="account-username">Tên người dùng</label><input id="account-username" autocomplete="username" minlength="3" maxlength="24" pattern="[A-Za-z0-9_]{3,24}" required /></div>
+          <div><label class="field-label" for="account-password">Mật khẩu</label><input id="account-password" type="password" autocomplete="current-password" minlength="12" maxlength="128" required /></div>
+          <div class="account-buttons"><button type="submit" class="button primary" value="login">Đăng nhập</button><button type="submit" class="button subtle" value="register">Đăng ký</button></div>
+          <p>Dùng 3–24 chữ cái không dấu, số hoặc dấu gạch dưới cho tên. Mật khẩu từ 12 ký tự và không có chức năng khôi phục.</p>
+        </form>
+        <div id="account-active" class="account-buttons" hidden><strong id="account-name"></strong><button type="button" id="account-logout" class="button subtle">Đăng xuất</button></div>
+        <p id="saved-rooms-hint"></p>
+        <ul id="saved-room-list" aria-describedby="saved-rooms-hint"></ul>
+      </section>
+      <p class="footnote">✺ Không cần đăng ký · Miễn phí trong giới hạn Cloudflare · Điều khiển bằng điện thoại hoặc laptop</p>
+    </section>
+
+    <section id="editor" class="view" hidden>
+      <div class="section-heading"><div><span class="eyebrow">✳ CREATOR STUDIO</span><h1>Thiết kế quiz <span class="accent-text">của bạn.</span></h1><p>Tạo một chút bất ngờ. Mọi thứ đều có thể chỉnh trước khi mở room.</p></div><button type="button" class="button soft" id="back-editor">← Quay lại</button></div>
+      <div class="editor-grid">
+        <aside class="editor-sidebar">
+          <div class="panel"><h3>Thông tin chung</h3><label class="field-label" for="quiz-title">Tên quiz</label><input id="quiz-title" maxlength="90" placeholder="Tên quiz thú vị..." />
+            <label class="field-label" for="quiz-time">Thời gian mặc định / câu</label><div class="input-suffix"><input id="quiz-time" type="number" min="5" max="120" value="20" /><span>giây</span></div>
+          </div>
+          <div class="panel"><h3>Nhập câu hỏi</h3><label class="file-drop" for="quiz-import"><span class="drop-emoji">⇪</span><strong>Chọn JSON hoặc CSV</strong><small>Có thể chọn thêm ảnh / GIF / video cùng lúc</small><input id="quiz-import" type="file" accept=".json,.csv,image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/ogg" multiple hidden /></label><a class="text-link" href="/quiz-mau.json" download>↓ Tải JSON mẫu</a><span class="divider-note">hoặc soạn thủ công</span></div>
+          <div class="panel questions-panel"><div class="flex-between"><h3>Danh sách câu hỏi</h3><span id="q-counter" class="count-tag">0</span></div><div id="question-list" class="question-list"></div><button type="button" id="add-question" class="button add-button full">＋ Thêm câu hỏi</button><button type="button" id="shuffle-questions" class="button subtle full">Xáo trộn thứ tự câu</button></div>
+        </aside>
+        <div class="editor-main">
+          <div class="panel editor-form"><div class="flex-between"><span class="eyebrow">QUESTION BUILDER</span><button type="button" class="delete-button" id="delete-question">⌫ Xoá câu</button></div>
+            <div class="editor-title-line"><h2 id="editor-q-heading">Câu 01</h2><span class="tag-soft">Tùy chọn nâng cao</span></div>
+            <label class="field-label" for="q-text">Nội dung câu hỏi</label><textarea id="q-text" rows="3" maxlength="600" placeholder="Đố mọi người một điều bất ngờ..."></textarea>
+            <div class="flex-between answers-heading"><label class="field-label">Danh sách lựa chọn (2–8)</label><button type="button" id="add-option" class="text-link button-link">＋ Thêm lựa chọn</button></div>
+            <div id="options-editor" class="options-editor"></div>
+            <div class="toggle-panel"><div><strong>🕵️ Chế độ đáp án ẩn</strong><p>Tất cả lựa chọn đều sai. Đáp án ẩn chỉ hiện khi hết giờ.</p></div><label class="switch"><input id="hidden-mode" type="checkbox"/><span class="switch-ui"></span></label></div>
+            <div id="normal-settings"><label class="field-label" for="correct-option">Đáp án đúng</label><select id="correct-option"></select><label class="field-label" for="explanation">Giải thích khi công bố (không bắt buộc)</label><textarea id="explanation" rows="2" maxlength="800" placeholder="Vì sao đây là đáp án đúng?"></textarea></div>
+            <div id="hidden-settings" hidden class="hidden-settings"><label class="field-label" for="hidden-text">Đáp án bí mật sẽ hiện lúc công bố ✨</label><input id="hidden-text" maxlength="260" placeholder="Ví dụ: Không phải đáp án nào cả!" /><label class="field-label" for="hidden-msg">Lời giải / câu troll</label><textarea id="hidden-msg" rows="2" maxlength="600" placeholder="Bạn đã bị lừa rồi 😼"></textarea></div>
+            <div class="media-grid"><div class="media-field"><label class="field-label" for="media-q">Media khi HIỆN câu hỏi</label><input id="media-q" placeholder="URL https://... hoặc tải file" /><label class="tiny-upload">＋ Chọn ảnh / GIF / video<input type="file" id="media-q-file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/ogg" hidden /></label><div id="media-q-preview" class="media-preview"></div></div>
+              <div class="media-field"><label class="field-label" for="media-r">Media khi CÔNG BỐ đáp án</label><input id="media-r" placeholder="URL https://... hoặc tải file" /><label class="tiny-upload">＋ Chọn ảnh / GIF / video<input type="file" id="media-r-file" accept="image/png,image/jpeg,image/webp,image/gif,video/mp4,video/webm,video/ogg" hidden /></label><div id="media-r-preview" class="media-preview"></div></div></div>
+            <label class="field-label" for="q-time">Đếm giờ riêng cho câu này</label><div class="input-suffix"><input id="q-time" type="number" min="5" max="120"/><span>giây</span></div>
+          </div>
+          <div class="editor-bottom"><div><strong>Sẵn sàng lên sóng?</strong><p id="draft-status">Hãy kiểm tra câu hỏi và đáp án nhé.</p></div><button type="button" id="create-room" class="button primary large">Tạo phòng & nhận mã →</button></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="room" class="view" hidden>
+      <div class="room-top"><div><span class="eyebrow" id="room-role">LIVE ROOM</span><h1 id="room-title">Quiz room</h1></div><div class="room-code-card"><small>MÃ PHÒNG</small><strong id="room-code">------</strong><button type="button" class="copy-mini" id="copy-code">⧉ Copy mã</button></div></div>
+      <div class="room-notice"><span id="phase-badge" class="phase-badge">SẢNH CHỜ</span><span id="room-hint">Mời bạn bè cùng vào phòng!</span><button type="button" class="link-white" id="copy-link">Sao chép link mời ↗</button></div>
+      <div class="room-grid"><div class="stage-column"><div id="stage" class="stage"></div><div id="host-actions" class="host-actions" hidden></div></div><aside class="ranking-panel"><div class="ranking-head"><div><span>THE LEADERBOARD</span><h2>🏆 Bảng xếp hạng</h2></div><span id="player-count" class="player-pill">0 người</span></div><div id="rankings" class="rankings"></div><div class="ranking-foot"><span>⚡</span> Cập nhật tự động khi mọi người chơi</div></aside></div>
+      <div class="room-footer"><button type="button" id="room-exit" class="button soft">← Về trang chủ</button><span id="connection-indicator">● Đang kết nối...</span></div>
+    </section>
+  </main>
+  <div id="toast" role="status" aria-live="polite" class="toast" hidden></div>
+  <footer class="site-footer wrap"><span>✳ QUIZBOO — Built for good laughs.</span><span>Không dùng câu hỏi để đánh giá nghiêm túc nhé!</span></footer>
+</body>
+</html>

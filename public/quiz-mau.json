@@ -1,0 +1,38 @@
+{
+  "title": "Quiz hội bạn thân — cẩn thận cú lừa!",
+  "time": 20,
+  "questions": [
+    {
+      "q": "Thủ đô của Việt Nam là thành phố nào?",
+      "options": ["Huế", "Hà Nội", "Đà Nẵng", "Cần Thơ"],
+      "answer": 1,
+      "time": 15,
+      "explanation": "Đúng rồi! Đây chỉ là câu khởi động."
+    },
+    {
+      "q": "Nhìn vào tấm hình này, đây là con gì?",
+      "media": "/media/troll-cat.svg",
+      "options": ["Chó", "Mèo", "Capybara"],
+      "answer": 1,
+      "revealMedia": "/media/troll-cat.svg",
+      "time": 20
+    },
+    {
+      "q": "Bài quiz này có bao nhiêu đáp án đúng ở câu hiện tại?",
+      "options": ["Một", "Hai", "Ba", "Bốn"],
+      "hidden": {
+        "text": "Không có đáp án nào trong 4 lựa chọn!",
+        "msg": "Tất cả lựa chọn đều sai. Câu này ai cũng được 0 điểm 😈",
+        "media": "/media/plot-twist.svg"
+      },
+      "time": 25
+    },
+    {
+      "q": "Cuối tuần làm gì là chill nhất?",
+      "options": ["Ngủ", "Đi cà phê", "Đi dã ngoại", "Xem phim", "Ăn ngon", "Gặp hội bạn"],
+      "answer": 5,
+      "explanation": "Đáp án của quản trò chính là: gặp hội bạn!",
+      "time": 20
+    }
+  ]
+}

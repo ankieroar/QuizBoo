@@ -1,0 +1,4 @@
+q,option1,option2,option3,option4,option5,answer,hidden_text,hidden_msg,media,reveal_media,time,explanation
+"2 + 2 = ?",3,4,5,6,,2,,,,,15,"Với phép cộng thông thường thì bằng 4."
+"Câu này có đáp án nào đúng?",A,B,C,D,,,"Không cái nào cả!","Troll thành công!",,,20,
+"Chọn món ăn ngon",Pizza,Bún,Phở,Cơm,Bánh mì,3,,,,,25,"Phở là đáp án quản trò chọn."

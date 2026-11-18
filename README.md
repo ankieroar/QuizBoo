@@ -2,10 +2,6 @@
 
 QuizBoo là trò chơi trắc nghiệm trực tuyến cho lớp học hoặc nhóm bạn. Quản trò tạo phòng và chia sẻ mã gồm 6 ký tự. Người chơi nhập tên và mã phòng để tham gia trên điện thoại hoặc máy tính.
 
-## Bản đang chạy
-
-[Mở QuizBoo trên Cloudflare Workers](https://troll-quiz-room.12a01-quiz.workers.dev/)
-
 ## Tính năng
 
 - Soạn câu hỏi hoặc nhập bộ đề từ JSON/CSV. Quản trò có thể sửa bộ câu hỏi trong sảnh chờ và xáo trộn thứ tự trước khi lưu.

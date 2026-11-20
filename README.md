@@ -9,7 +9,7 @@ QuizBoo là trò chơi trắc nghiệm trực tuyến cho lớp học hoặc nh�
 - Bảng xếp hạng chỉ hiển thị người chơi đang online. Khi người chơi bấm **Về trang chủ**, bảng cập nhật ở lượt đồng bộ tiếp theo. Khi đóng tab, trình duyệt cũng thử báo rời phòng. Nếu mất kết nối, trạng thái tự hết hạn sau tối đa khoảng 45 giây tính từ lần ghi nhận gần nhất. Quản trò có thể kick người chơi, kết thúc phòng hoặc cho chơi lại. Người bị kick có thể mở lại phòng từ cùng trình duyệt bằng mã phòng và giữ điểm đã có.
 - Quản trò có thể đăng ký bằng tên người dùng và mật khẩu để mở lại phòng từ thiết bị khác. Phòng tạo khi chưa đăng nhập có thể gắn vào tài khoản từ trình duyệt đã tạo phòng. Tài khoản chưa hỗ trợ khôi phục mật khẩu.
 - Có thể dùng ảnh, GIF hoặc video cho câu hỏi và phần công bố đáp án.
-- Trên điện thoại, chụm hoặc tách hai ngón trên khu vực câu hỏi để đổi cỡ tạm thời. Khu vực này trở về cỡ mặc định khi thả tay. Có thể bật hoặc tắt âm thanh bằng nút **Âm thanh**. Trình duyệt bắt đầu phát âm thanh sau lần tương tác đầu tiên.
+- Trên điện thoại, chụm hoặc tách hai ngón trên khu vực câu hỏi để đổi cỡ tạm thời, hoặc dùng **−**, **100%**, **+** để đặt cỡ. Bấm **Bảng xếp hạng** để tới bảng điểm ngay. Trình duyệt cho phát tiếng sau lần tương tác đầu tiên. Nếu nút hiện **Bật âm thanh**, bấm nút để thử mở tiếng.
 
 ## Chạy trên máy
 

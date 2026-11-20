@@ -7,8 +7,8 @@
   <meta name="description" content="Tạo phòng quiz troll, đáp án ẩn, media và bảng xếp hạng trực tuyến." />
   <title>QuizBoo — Troll Quiz Live</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <link rel="stylesheet" href="/style.css" />
-  <script src="/app.js" type="module"></script>
+  <link rel="stylesheet" href="/style.css?v=mobile-controls" />
+  <script src="/app.js?v=mobile-controls" type="module"></script>
 </head>
 <body>
   <div class="page-glow glow-a" aria-hidden="true"></div><div class="page-glow glow-b" aria-hidden="true"></div>
@@ -96,11 +96,21 @@
       <div class="room-notice"><span id="phase-badge" class="phase-badge">SẢNH CHỜ</span><span id="room-hint">Mời bạn bè cùng vào phòng!</span><button type="button" class="link-white" id="copy-link">Sao chép link mời ↗</button></div>
       <div class="room-grid">
         <div class="stage-column">
+          <div class="room-tools">
+            <button type="button" class="button soft" id="open-ranking" aria-controls="ranking-panel">Bảng xếp hạng</button>
+            <button type="button" id="stage-video-sound" class="button subtle video-sound-toggle" aria-pressed="false" hidden>Bật tiếng video</button>
+            <div class="zoom-controls" id="zoom-controls" role="group" aria-label="Thu phóng câu hỏi">
+              <button type="button" data-zoom="out" aria-label="Thu nhỏ">−</button>
+              <button type="button" data-zoom="reset" aria-label="Về cỡ mặc định">100%</button>
+              <button type="button" data-zoom="in" aria-label="Phóng to">+</button>
+            </div>
+          </div>
           <div id="stage-viewport" class="stage-viewport"><div id="stage" class="stage"></div></div>
           <div id="host-actions" class="host-actions" hidden></div>
         </div>
         <aside id="ranking-panel" class="ranking-panel" aria-labelledby="ranking-title" hidden>
           <div class="ranking-head"><h2 id="ranking-title" tabindex="-1">Bảng xếp hạng</h2><span id="player-count" class="player-pill">0 người</span></div>
+          <button type="button" class="button subtle" id="back-to-stage">Về câu hỏi</button>
           <div id="rankings" class="rankings"><div id="empty-ranking" class="empty-rank">Chưa có người chơi online.</div></div>
           <div id="final-actions" class="final-actions" hidden>
             <button type="button" class="button soft" data-room-exit>Về trang chủ</button>

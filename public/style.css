@@ -63,16 +63,49 @@ html { scroll-behavior: auto; -webkit-text-size-adjust: 100%; text-size-adjust: 
 .host-actions { background: #eae2ff; }
 .host-actions p { font-size: .875rem; color: #514274; }
 
+.room-tools {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.zoom-controls {
+  display: flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid #ded4f3;
+  border-radius: 12px;
+  background: #fff;
+}
+.zoom-controls button {
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #4b337e;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+.zoom-controls button:active { background: #f0e8ff; }
+.zoom-controls button[data-zoom="reset"] { min-width: 60px; }
+#back-to-stage { display: none; }
+#ranking-panel, #open-ranking { scroll-margin-block-start: 12px; }
 .stage-viewport {
   overflow: hidden;
   border-radius: var(--stage-radius);
   box-shadow: var(--shadow);
   touch-action: pan-y;
 }
+.stage-viewport.is-zoomed { overflow: auto; touch-action: pan-x pan-y; }
 .stage {
   border-radius: var(--stage-radius);
   box-shadow: none;
   transform: scale(var(--stage-scale, 1));
+  transform-origin: top left;
   transition: transform .22s ease-out;
 }
 .stage.is-pinching { transition: none; user-select: none; }
@@ -256,6 +289,7 @@ html { scroll-behavior: auto; -webkit-text-size-adjust: 100%; text-size-adjust: 
 }
 
 @media (max-width: 760px) {
+  #back-to-stage { display: inline-flex; margin: 8px 12px 0; }
   .wrap {
     padding-inline-start: max(14px, env(safe-area-inset-left));
     padding-inline-end: max(14px, env(safe-area-inset-right));

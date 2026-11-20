@@ -1,8 +1,30 @@
-import {setupSounds, setupStageZoom} from './room-effects.js';
+import {setupSounds, setupStageZoom} from './room-effects.js?v=mobile-controls';
 
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+const storage = (() => {
+  const memory=new Map();
+  return {
+    getItem(key) {
+      if (memory.has(key)) return memory.get(key);
+      try { return localStorage.getItem(key); } catch { return null; }
+    },
+    setItem(key,value) {
+      try { localStorage.setItem(key,value); memory.delete(key); }
+      catch { memory.set(key,value); }
+    },
+    removeItem(key) {
+      try { localStorage.removeItem(key); memory.delete(key); }
+      catch { memory.set(key,null); }
+    },
+    keys() {
+      let keys=[];
+      try { keys=Object.keys(localStorage); } catch {}
+      return [...new Set([...keys,...memory.keys()])].filter(key=>memory.get(key)!==null);
+    }
+  };
+})();
 const state = {
   view: 'home', draft: null, selected: 0, files: new Map(), pendingRoom: null, editingRoom: null,
   role: null, code: '', hostToken: '', playerToken: '', room: null,
@@ -11,7 +33,7 @@ const state = {
   finalRanking:[], showFinalRanking:true, rankRows:new Map(), pendingAnswer:null
 };
 const sound = setupSounds($('#sound-toggle'));
-const resetStageZoom = setupStageZoom($('#stage-viewport'), $('#stage'));
+const resetStageZoom = setupStageZoom($('#stage-viewport'), $('#stage'), $('#zoom-controls'));
 const symbols = 'ABCDEFGH';
 const quizText = value => esc(String(value ?? '').normalize('NFC'));
 const MAX_MEDIA_BYTES = 150 * 1024 * 1024;
@@ -33,6 +55,7 @@ function setView(view) {
   if (previousView === 'room' && view !== 'room') {
     notifyPlayerLeft();
     sound.stop();
+    $('#stage video')?.pause();
     resetStageZoom();
   }
   state.view = view;
@@ -60,11 +83,11 @@ function notifyPlayerLeft() {
 function renderSavedRooms() {
   const list = $('#saved-room-list');
   const owned = new Set(state.account.rooms.map(room=>room.code));
-  const localRooms = Object.keys(localStorage)
-    .filter(key => /^tq-host-[A-HJ-NP-Z2-9]{6}$/.test(key) && localStorage.getItem(key))
+  const localRooms = storage.keys()
+    .filter(key => /^tq-host-[A-HJ-NP-Z2-9]{6}$/.test(key) && storage.getItem(key))
     .map(key => {
       const code = key.slice('tq-host-'.length);
-      return { code, title: localStorage.getItem('tq-room-title-'+code) };
+      return { code, title: storage.getItem('tq-room-title-'+code) };
     })
     .filter(room=>!owned.has(room.code));
   const rooms = [...state.account.rooms, ...localRooms]
@@ -141,9 +164,48 @@ function mediaMarkup(src, className = 'question-media', selectedFile = null, eag
   const safe = resolveMediaForPreview(src);
   if (!safe) return '';
   if (isVideo(src, selectedFile || state.files.get(src))) {
-    return `<video class="${className}" src="${esc(safe)}" controls playsinline preload="metadata"></video>`;
+    const stageVideo=className==='question-media' || className==='reveal-media';
+    return `<video class="${className}" src="${esc(safe)}" controls playsinline preload="metadata"${stageVideo?' muted':''}></video>`;
   }
   return `<img class="${className}" src="${esc(safe)}" alt="Media của quiz" loading="${eager?'eager':'lazy'}"/>`;
+}
+function startStageVideo() {
+  const video=$('#stage video');
+  if (!video) return;
+  video.muted=true;
+  video.autoplay=true;
+  $('#stage-video-sound').hidden=false;
+  video.play().catch(()=>{ /* Native controls remain available if autoplay is blocked. */ });
+}
+function bindVideoSound(stage) {
+  const video=$('video',stage);
+  if (!video) return;
+  const button=$('#stage-video-sound');
+  const update=()=>{
+    if (!video.isConnected) return;
+    setText(button,video.muted?'Bật tiếng video':'Tắt tiếng video');
+    button.setAttribute('aria-pressed',String(!video.muted));
+  };
+  const toggle=()=>{
+    video.muted=!video.muted;
+    if (!video.muted && video.paused) video.play().catch(()=>{});
+    update();
+  };
+  let touchStart, lastTap=-Infinity;
+  button.ontouchstart=event=>{touchStart=event.touches.length===1 ? event.touches[0] : null;};
+  button.ontouchend=event=>{
+    const end=event.changedTouches[0];
+    if (!touchStart || !end || event.touches.length ||
+        Math.hypot(end.clientX-touchStart.clientX,end.clientY-touchStart.clientY)>12) return;
+    if (event.cancelable) event.preventDefault();
+    lastTap=performance.now();
+    toggle();
+  };
+  button.onclick=event=>{
+    if (event.detail===0 || performance.now()-lastTap>450) toggle();
+  };
+  video.addEventListener('volumechange',update);
+  update();
 }
 function renderPreview(slot, value) {
   const el = $(slot);
@@ -434,8 +496,8 @@ async function createRoom() {
       room = await api('/api/rooms', { quiz: strippedQuiz(), requireAccount:!!state.account.username });
       state.pendingRoom = room;
       if (room.hostToken) {
-        localStorage.setItem('tq-host-'+room.code, room.hostToken);
-        localStorage.setItem('tq-room-title-'+room.code, state.draft.title.trim());
+        storage.setItem('tq-host-'+room.code, room.hostToken);
+        storage.setItem('tq-room-title-'+room.code, state.draft.title.trim());
       }
     }
     if (refs.length) toast(`Đang tải ${refs.length} media lên R2...`);
@@ -455,7 +517,7 @@ async function createRoom() {
       if(q.hidden) q.hidden.media=resolved(q.hidden.media);
     }
     await api(`/api/rooms/${room.code}/quiz`, { hostToken:room.hostToken, quiz });
-    if (room.hostToken) localStorage.setItem('tq-room-title-'+room.code, quiz.title.trim());
+    if (room.hostToken) storage.setItem('tq-room-title-'+room.code, quiz.title.trim());
     state.pendingRoom=null;
     toast(editingRoom ? 'Đã lưu bộ câu hỏi.' : 'Phòng đã sẵn sàng! Chia sẻ mã cho bạn bè nhé.');
     await connectRoom(room.code, 'host', room.hostToken);
@@ -472,6 +534,7 @@ async function copyText(value) {
 async function connectRoom(code, role, secret) {
   clearInterval(state.poller); clearInterval(state.timer);
   clearTimeout(state.phaseTimer);
+  resetStageZoom();
   const session = ++state.roomSession;
   state.busy = false;
   state.pollQueued = false;
@@ -483,6 +546,7 @@ async function connectRoom(code, role, secret) {
   state.rankRows.clear();
   state.pendingAnswer=null;
   $('#ranking-panel').hidden=true;
+  $('#stage-video-sound').hidden=true;
   $('#host-actions').hidden=true;
   setView('room');
   history.replaceState({}, '', location.pathname + '?room=' + encodeURIComponent(code));
@@ -501,7 +565,7 @@ async function connectRoom(code, role, secret) {
   if (session !== state.roomSession) return;
   state.poller=setInterval(pollSafe, 2800);
   state.timer=setInterval(updateTimer, 180);
-  localStorage.setItem('tq-last-code', code);
+  storage.setItem('tq-last-code', code);
 }
 async function poll(refreshAfterPending = false) {
   if (state.view!=='room') return;
@@ -608,6 +672,7 @@ function updateTimer() {
     const content=$('#question-content');
     content.inert=false;
     content.classList.replace('is-preparing','is-opening');
+    startStageVideo();
     setText($('#phase-badge'),phaseName(d.phase));
     if (!d.host) renderActiveAnswer(d);
   }
@@ -640,12 +705,10 @@ function renderRoom() {
 function renderRanking(d) {
   const ended=d.phase==='ended';
   const final=ended && state.showFinalRanking;
-  const visible=!ended || final || d.host;
-  $('#ranking-panel').hidden=!visible;
+  $('#ranking-panel').hidden=false;
   $('#final-actions').hidden=!final;
   $('#room-exit').hidden=final;
   $('#show-final-ranking').hidden=!ended || final;
-  if (!visible) return;
   const players=final ? state.finalRanking : d.leaderboard;
   setText($('#ranking-title'),final ? 'Xếp hạng chung cuộc' : d.phase==='reveal' ? `Bảng điểm sau câu ${d.index+1}` : 'Bảng xếp hạng');
   setText($('#player-count'),final ? `${players.length} người` : `${d.count} online`);
@@ -655,7 +718,8 @@ function renderRanking(d) {
   const reordered=current.length!==players.length || players.some((p,i)=>rows.get(p.id)?.row!==current[i]);
   const before=new Map();
   let bounds;
-  if (reordered && current.length && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  if (reordered && current.length && typeof Element.prototype.animate==='function' &&
+      !matchMedia('(prefers-reduced-motion: reduce)').matches) {
     bounds=list.getBoundingClientRect();
     for (const row of current) {
       const rect=row.getBoundingClientRect();
@@ -749,6 +813,12 @@ function renderAnswerResult(room, solution) {
 }
 function renderStage(d) {
   const stage=$('#stage');
+  $('video',stage)?.pause();
+  const soundButton=$('#stage-video-sound');
+  soundButton.hidden=true;
+  soundButton.onclick=null;
+  soundButton.ontouchstart=null;
+  soundButton.ontouchend=null;
   if(d.phase==='lobby') {
     stage.innerHTML=`<div class="stage-lobby"><div class="stage-big-icon">🎲</div><h2>${d.host?'Chuẩn bị bùng nổ!':'Bạn đã vào phòng!'}</h2><p>${d.host?'Chia sẻ mã phòng cho bạn bè. Khi mọi người vào đủ, hãy nhấn Bắt đầu.':'Chờ quản trò bắt đầu quiz. Đừng quên để ý đáp án đặc biệt nhé!'}</p><div class="invite-code">${esc(d.code)}</div><p>Đã có <strong>${d.count}</strong> người chơi tham gia.</p></div>`;
     return;
@@ -788,6 +858,8 @@ function renderStage(d) {
     <h2 class="question-text">${quizText(q.q)}</h2>
     <div class="answer-grid">${options}</div>
     ${hint}</div>`;
+  bindVideoSound(stage);
+  if (!preparing) startStageVideo();
   if(!d.host && !reveal) {
     $$('[data-choice]',stage).forEach(btn=>btn.onclick=()=>submitAnswer(Number(btn.dataset.choice)));
   }
@@ -890,6 +962,19 @@ async function submitAnswer(choice) {
 function initRoom() {
   window.addEventListener('pagehide',notifyPlayerLeft);
   window.addEventListener('pageshow',e=>{ if (e.persisted) pollSafe(); });
+  const openRanking=$('#open-ranking');
+  const backToStage=$('#back-to-stage');
+  if (openRanking && backToStage) {
+    openRanking.onclick=()=>{
+      if ($('#ranking-panel').hidden) return;
+      $('#ranking-panel').scrollIntoView({block:'start'});
+      $('#ranking-title').focus({preventScroll:true});
+    };
+    backToStage.onclick=()=>{
+      openRanking.scrollIntoView({block:'start'});
+      openRanking.focus({preventScroll:true});
+    };
+  }
   $('#account-form').onsubmit=async e=>{
     e.preventDefault();
     const form=e.currentTarget;
@@ -922,9 +1007,9 @@ function initRoom() {
       const code=claim.dataset.claimRoom;
       claim.disabled=true;
       try {
-        await api('/api/account/claim',{code,hostToken:localStorage.getItem('tq-host-'+code)});
-        localStorage.removeItem('tq-host-'+code);
-        localStorage.removeItem('tq-room-title-'+code);
+        await api('/api/account/claim',{code,hostToken:storage.getItem('tq-host-'+code)});
+        storage.removeItem('tq-host-'+code);
+        storage.removeItem('tq-room-title-'+code);
         await refreshAccount();
         toast('Đã lưu phòng vào tài khoản.');
       } catch(error) { toast(error.message,true); }
@@ -934,7 +1019,7 @@ function initRoom() {
     const button=e.target.closest('[data-open-room]');
     if(!button) return;
     const code=button.dataset.openRoom;
-    const host=localStorage.getItem('tq-host-'+code);
+    const host=storage.getItem('tq-host-'+code);
     if(state.account.rooms.some(room=>room.code===code)) connectRoom(code,'host','');
     else if(host) connectRoom(code,'host',host);
     else renderSavedRooms();
@@ -965,9 +1050,9 @@ function initRoom() {
     if(!/^[A-HJ-NP-Z2-9]{6}$/.test(code)) return toast('Mã phòng gồm 6 ký tự (không dùng I, O, 0, 1).',true);
     const button=$('#join-form button[type="submit"]'); button.disabled=true;
     try {
-      const old=localStorage.getItem('tq-player-'+code);
+      const old=storage.getItem('tq-player-'+code);
       const result=await api(`/api/rooms/${code}/join`,{name,playerToken:old||undefined});
-      localStorage.setItem('tq-player-'+code,result.playerToken);
+      storage.setItem('tq-player-'+code,result.playerToken);
       await connectRoom(code,'player',result.playerToken);
     } catch(err) {toast(err.message,true);}
     finally{button.disabled=false;}
@@ -981,7 +1066,7 @@ async function boot() {
   const code=(params.get('room')||'').toUpperCase();
   if(/^[A-HJ-NP-Z2-9]{6}$/.test(code)) {
     $('#join-code').value=code;
-    const host=localStorage.getItem('tq-host-'+code),player=localStorage.getItem('tq-player-'+code);
+    const host=storage.getItem('tq-host-'+code),player=storage.getItem('tq-player-'+code);
     if(state.account.rooms.some(room=>room.code===code)) await connectRoom(code,'host','');
     else if(host) await connectRoom(code,'host',host);
     else if(player) await connectRoom(code,'player',player);

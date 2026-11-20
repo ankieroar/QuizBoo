@@ -15,37 +15,110 @@ const cues = {
   defeat: [[440, 0, .18], [349, .16, .18], [262, .32, .3]]
 };
 
+function mediaSoundOutput() {
+  const audio=new Audio();
+  const cueUrl=names=>new URL(`./sounds/${names.join('-') || 'unlock'}.mp3`,import.meta.url).href;
+  let ready=false, result=false;
+
+  audio.preload='auto';
+  audio.src=cueUrl([]);
+  audio.hidden=true;
+  document.body.append(audio);
+  let attempt=0;
+  async function start(names) {
+    const click=names[0]==='click';
+    if (click && result && !audio.paused) return true;
+    const current=++attempt;
+    result=names.length>0 && !click;
+    try {
+      const url=cueUrl(names);
+      if (audio.src!==url) audio.src=url;
+      else if (audio.readyState>0) audio.currentTime=0;
+      await audio.play();
+      if (attempt===current) ready=true;
+    } catch {
+      if (attempt===current) ready=false;
+    }
+    return ready;
+  }
+  return {start, get ready() { return ready; }, stop() { attempt++; audio.pause(); }};
+}
+
 export function setupSounds(button) {
   const Audio = window.AudioContext || window.webkitAudioContext;
-  if (!Audio) return {play() {}, stop() {}};
-  let enabled = localStorage.getItem('quizboo-sound') !== 'off';
+  if (!button || (!Audio && typeof window.Audio!=='function')) return {play() {}, stop() {}};
+  let enabled = true;
+  try { enabled = localStorage.getItem('quizboo-sound') !== 'off'; } catch {}
   let context, output, activeResult = [];
+  let fallback=Audio ? null : mediaSoundOutput();
+  let mediaUnlock;
 
-  function updateButton() {
-    button.textContent = enabled ? '🔊 Âm thanh' : '🔇 Âm thanh';
-    button.setAttribute('aria-pressed', String(enabled));
+  function isRunning() {
+    return fallback ? fallback.ready : context?.state==='running';
   }
 
-  function unlock() {
-    if (!enabled) return Promise.resolve();
+  function updateButton() {
+    const running=enabled && isRunning();
+    button.textContent = running ? '🔊 Âm thanh' : mediaUnlock && enabled ? 'Đang bật âm thanh…' : '🔇 Bật âm thanh';
+    button.setAttribute('aria-pressed', String(running));
+  }
+
+  function unlock(gesture = false) {
+    if (fallback) {
+      if (!enabled || !gesture || fallback.ready) return Promise.resolve(enabled && fallback.ready);
+      if (!mediaUnlock) {
+        mediaUnlock=fallback.start([]).finally(()=>{mediaUnlock=null;updateButton();});
+        updateButton();
+      }
+      return mediaUnlock;
+    }
+    if (!enabled || (!context && !gesture)) return Promise.resolve(false);
     try {
+      if (gesture && context?.state==='interrupted') {
+        stop();
+        context.close().catch(()=>{});
+        context=null;
+      }
+      if (gesture && context?.state==='closed') context=null;
       if (!context) {
         context = new Audio();
         output = context.createGain();
         output.connect(context.destination);
+        context.onstatechange=updateButton;
+        // Start a silent buffer inside the gesture as well as requesting resume.
+        const primer=context.createBufferSource();
+        primer.buffer=context.createBuffer(1,1,context.sampleRate);
+        primer.connect(output);
+        primer.onended=()=>primer.disconnect();
+        primer.start();
       }
-      return context.state === 'running' ? Promise.resolve() : context.resume().catch(()=>{});
+      if (context.state==='running') {
+        updateButton();
+        return Promise.resolve(true);
+      }
+      return context.resume().then(()=>{
+        updateButton();
+        return context.state==='running';
+      }).catch(()=>false);
     } catch {
-      return Promise.resolve();
+      if (gesture && !context && typeof window.Audio==='function') {
+        fallback=mediaSoundOutput();
+        return unlock(true);
+      }
+      updateButton();
+      return Promise.resolve(false);
     }
   }
 
   function stop() {
-    for (const note of activeResult) note.stop();
+    fallback?.stop();
+    for (const note of activeResult) {
+      try { note.stop(); } catch {}
+    }
     activeResult = [];
   }
 
-  function play(...names) {
+  function playNotes(names) {
     if (!enabled || context?.state !== 'running') return;
     const click = names[0] === 'click';
     if (!click) stop();
@@ -59,7 +132,7 @@ export function setupSounds(button) {
         oscillator.type = wave || (name === 'wrong' ? 'triangle' : 'sine');
         oscillator.frequency.value = frequency;
         envelope.gain.setValueAtTime(.001, time);
-        envelope.gain.exponentialRampToValueAtTime(click || name === 'victory' ? .065 : .12, time + .014);
+        envelope.gain.exponentialRampToValueAtTime(click ? .09 : name==='victory' ? .065 : .12, time + .014);
         envelope.gain.exponentialRampToValueAtTime(.001, time + duration);
         oscillator.connect(envelope);
         envelope.connect(output);
@@ -77,55 +150,144 @@ export function setupSounds(button) {
     }
   }
 
+  function play(...names) {
+    if (!enabled) return;
+    if (fallback) {
+      if (fallback.ready) fallback.start(names).then(updateButton);
+      return;
+    }
+    if (context?.state==='running') playNotes(names);
+    else if (context) {
+      const requested=performance.now();
+      unlock().then(ready=>{
+        if (ready && !document.hidden && performance.now()-requested<1500) playNotes(names);
+      });
+    }
+  }
+
   button.hidden = false;
   updateButton();
   button.onclick = () => {
-    enabled = !enabled;
-    localStorage.setItem('quizboo-sound', enabled ? 'on' : 'off');
+    enabled = !(enabled && isRunning());
+    try { localStorage.setItem('quizboo-sound',enabled?'on':'off'); } catch {}
     if (output) output.gain.value = enabled ? 1 : 0;
     updateButton();
-    if (enabled) unlock().then(()=>play('click'));
+    if (enabled) unlock(true).then(ready=>{ if (ready) play('click'); });
     else stop();
   };
+  function unlockFromGesture(event) {
+    if (event.isTrusted && !button.contains(event.target)) unlock(true);
+  }
+  document.addEventListener('pointerup',unlockFromGesture,{capture:true,passive:true});
+  document.addEventListener('touchend',unlockFromGesture,{capture:true,passive:true});
+  document.addEventListener('keydown',unlockFromGesture,{capture:true});
   document.addEventListener('click', event => {
-    const control = event.target.closest('button, a[href]');
-    if (control && control !== button && enabled) unlock().then(()=>play('click'));
+    const control = event.target.closest?.('button, a[href]');
+    if (event.isTrusted && control && control!==button && enabled) unlock(true).then(ready=>{
+      if (ready) play('click');
+    });
   }, {capture:true});
-  document.addEventListener('submit', unlock, {capture:true});
+  document.addEventListener('submit',unlockFromGesture,{capture:true});
+  document.addEventListener('visibilitychange',()=>{
+    if (document.hidden) stop();
+    else unlock();
+  });
+  window.addEventListener('pageshow',()=>unlock());
   return {play, stop};
 }
 
-export function setupStageZoom(viewport, stage) {
-  let gesture;
-  const distance = touches => Math.hypot(touches[0].clientX-touches[1].clientX, touches[0].clientY-touches[1].clientY);
+export function setupStageZoom(viewport, stage, controls) {
+  if (!viewport || !stage) return ()=>{};
+  const min=.8, max=1.8;
+  let scale=1, gesture=null, frame=0;
+  const clamp=value=>Math.max(min,Math.min(max,value));
+  const distance=(a,b)=>Math.hypot(a.clientX-b.clientX,a.clientY-b.clientY);
+  const resetButton=controls?.querySelector('[data-zoom="reset"]');
+  const zoomOut=controls?.querySelector('[data-zoom="out"]');
+  const zoomIn=controls?.querySelector('[data-zoom="in"]');
+
+  function applyZoom(value) {
+    scale=clamp(Math.round(value*100)/100);
+    stage.style.setProperty('--stage-scale',String(scale));
+    viewport.classList.toggle('is-zoomed',scale>1);
+    if (resetButton) {
+      resetButton.textContent=`${Math.round(scale*100)}%`;
+      zoomOut.disabled=scale<=min;
+      zoomIn.disabled=scale>=max;
+    }
+    if (scale<=1) { viewport.scrollTop=0; viewport.scrollLeft=0; }
+  }
+
+  function finishGesture() {
+    if (!gesture) return;
+    gesture=null;
+    cancelAnimationFrame(frame);
+    frame=0;
+    stage.classList.remove('is-pinching');
+    stage.style.transformOrigin='';
+    applyZoom(scale);
+  }
 
   function reset() {
-    gesture = null;
-    stage.classList.remove('is-pinching');
-    stage.style.removeProperty('--stage-scale');
+    finishGesture();
+    applyZoom(1);
+  }
+
+  function startGesture(type,x,y) {
+    const rect=viewport.getBoundingClientRect();
+    gesture={type,zoom:scale};
+    if (!Number.isFinite(x)) x=rect.left+rect.width/2;
+    if (!Number.isFinite(y)) y=rect.top+rect.height/2;
+    stage.style.transformOrigin=`${x-rect.left+viewport.scrollLeft}px ${y-rect.top+viewport.scrollTop}px`;
+    stage.classList.add('is-pinching');
+  }
+
+  function preview(value) {
+    cancelAnimationFrame(frame);
+    frame=requestAnimationFrame(()=>{
+      if (gesture) stage.style.setProperty('--stage-scale',String(clamp(value)));
+    });
+  }
+
+  if (controls) {
+    zoomOut.onclick=()=>{finishGesture();applyZoom(scale-.2);};
+    zoomIn.onclick=()=>{finishGesture();applyZoom(scale+.2);};
+    resetButton.onclick=reset;
   }
 
   viewport.addEventListener('touchstart', event => {
-    if (event.touches.length !== 2) {
-      if (gesture) reset();
+    if (event.touches.length!==2) {
+      if (gesture?.type==='touch') finishGesture();
       return;
     }
     const first = event.touches[0], second = event.touches[1];
-    const rect = viewport.getBoundingClientRect();
-    gesture = {distance: Math.max(distance(event.touches), 1)};
-    stage.style.transformOrigin = `${(first.clientX+second.clientX)/2-rect.left}px ${(first.clientY+second.clientY)/2-rect.top}px`;
-    stage.classList.add('is-pinching');
+    startGesture('touch',(first.clientX+second.clientX)/2,(first.clientY+second.clientY)/2);
+    gesture.distance=Math.max(distance(first,second),1);
     if (event.cancelable) event.preventDefault();
   }, {passive:false});
   viewport.addEventListener('touchmove', event => {
-    if (!gesture || event.touches.length !== 2) return;
-    const scale = Math.min(1.85, Math.max(.82, distance(event.touches)/gesture.distance));
-    stage.style.setProperty('--stage-scale', String(scale));
+    if (gesture?.type!=='touch' || event.touches.length!==2) return;
     if (event.cancelable) event.preventDefault();
+    preview(gesture.zoom*distance(event.touches[0],event.touches[1])/gesture.distance);
   }, {passive:false});
   viewport.addEventListener('touchend', event => {
-    if (event.touches.length < 2) reset();
+    if (gesture?.type==='touch' && event.touches.length<2) finishGesture();
   }, {passive:true});
-  viewport.addEventListener('touchcancel', reset, {passive:true});
+  viewport.addEventListener('touchcancel', finishGesture, {passive:true});
+
+  // WebKit can deliver native gesture events instead of a complete touch sequence.
+  viewport.addEventListener('gesturestart',event=>{
+    if (event.cancelable) event.preventDefault();
+    if (!gesture) startGesture('webkit',event.clientX,event.clientY);
+  },{passive:false});
+  viewport.addEventListener('gesturechange',event=>{
+    if (event.cancelable) event.preventDefault();
+    if (gesture?.type==='webkit' && Number.isFinite(event.scale)) preview(gesture.zoom*event.scale);
+  },{passive:false});
+  viewport.addEventListener('gestureend',()=>{
+    if (gesture?.type==='webkit') finishGesture();
+  });
+  window.addEventListener('blur',finishGesture);
+  document.addEventListener('visibilitychange',()=>{ if (document.hidden) finishGesture(); });
   return reset;
 }

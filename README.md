@@ -6,7 +6,7 @@ QuizBoo là trò chơi trắc nghiệm trực tuyến cho lớp học hoặc nh�
 
 - Soạn câu hỏi hoặc nhập bộ đề từ JSON/CSV. Quản trò có thể sửa bộ câu hỏi trong sảnh chờ và xáo trộn thứ tự trước khi lưu.
 - Mỗi câu có từ 2 đến 8 lựa chọn và bộ đếm riêng. Điểm của câu thường giảm từ 1.000 xuống 500 theo thời gian. Với câu có đáp án ẩn, mọi lựa chọn đều sai và đáp án chỉ hiện khi hết giờ.
-- Bảng xếp hạng cập nhật trong lúc chơi. Quản trò có thể kết thúc phòng ngay, xem kết quả rồi cho chơi lại.
+- Bảng xếp hạng chỉ hiển thị người chơi đang online. Khi người chơi bấm **Về trang chủ**, bảng cập nhật ở lượt đồng bộ tiếp theo. Khi đóng tab, trình duyệt cũng thử báo rời phòng. Nếu mất kết nối, trạng thái tự hết hạn sau tối đa khoảng 45 giây tính từ lần ghi nhận gần nhất. Quản trò có thể kick người chơi, kết thúc phòng hoặc cho chơi lại. Người bị kick có thể mở lại phòng từ cùng trình duyệt bằng mã phòng và giữ điểm đã có.
 - Quản trò có thể đăng ký bằng tên người dùng và mật khẩu để mở lại phòng từ thiết bị khác. Phòng tạo khi chưa đăng nhập có thể gắn vào tài khoản từ trình duyệt đã tạo phòng. Tài khoản chưa hỗ trợ khôi phục mật khẩu.
 - Có thể dùng ảnh, GIF hoặc video cho câu hỏi và phần công bố đáp án.
 
@@ -32,8 +32,9 @@ Giao diện và API dùng Cloudflare Workers. D1 lưu phòng, người chơi, đ
 1. Đăng nhập bằng `npx wrangler login` và kiểm tra tài khoản bằng `npx wrangler whoami`.
 2. Nếu chưa có cơ sở dữ liệu, chạy `npx wrangler d1 create troll-quiz-db`. Nếu đã có, lấy ID bằng `npx wrangler d1 list`.
 3. Sao chép `wrangler.example.jsonc` thành `wrangler.jsonc` nếu chưa có. Điền ID D1 vào mục có binding `DB`.
-4. Chạy `npm.cmd run db:remote` để tạo bảng, sau đó chạy `npm.cmd run deploy`.
-5. Mở URL `workers.dev` mà Wrangler in ra. Thử đăng ký, tạo phòng và vào chơi bằng cửa sổ ẩn danh.
+4. Kích hoạt R2 trong Cloudflare Dashboard. Chạy `npx.cmd wrangler r2 bucket list` để xem bucket hiện có. Nếu chưa có bucket media, chạy `npx.cmd wrangler r2 bucket create quizboo-media`. Nếu dùng bucket khác, điền tên thực tế vào `r2_buckets` trong `wrangler.jsonc` và giữ binding `MEDIA`.
+5. Chạy `npm.cmd run db:remote` để tạo bảng, sau đó chạy `npm.cmd run deploy`.
+6. Mở URL `workers.dev` mà Wrangler in ra. Kiểm tra `/api/health` trả về `"r2":true`, sau đó thử tạo phòng với một file và vào chơi bằng cửa sổ ẩn danh.
 
 Khi cập nhật mã nguồn, chạy lại `npm.cmd run deploy`. Nếu phiên bản mới bổ sung bảng trong `schema.sql`, chạy `npm.cmd run db:remote` trước. Dữ liệu thử trên máy và dữ liệu Cloudflare được lưu riêng.
 
@@ -41,7 +42,7 @@ Khi cập nhật mã nguồn, chạy lại `npm.cmd run deploy`. Nếu phiên b�
 
 Bạn có thể dùng link HTTPS hoặc để file trong `public/media/` rồi nhập đường dẫn như `/media/anh-cau-hoi.png`. File đặt trong `public/` có thể truy cập công khai.
 
-Để tải file trực tiếp từ trình soạn thảo, bật R2 trên Cloudflare, tạo bucket và thêm binding `MEDIA` vào `wrangler.jsonc`. Mỗi file tải qua ứng dụng tối đa 15 MB. R2 có hạn mức miễn phí dùng chung cho tài khoản và có thể tính phí vượt mức.
+Trình soạn thảo tải file vào bucket R2 qua binding `MEDIA`. Mỗi file tối đa 150 MB. File trên 15 MB được chia thành các phần 8 MB, tải tối đa hai phần song song và tự thử lại từng phần nếu mạng lỗi. Dùng lớp lưu trữ Standard để hưởng hạn mức R2 miễn phí của tài khoản. Cloudflare có thể tính phí R2 khi vượt hạn mức. [Giá và hạn mức R2](https://developers.cloudflare.com/r2/pricing/)
 
 ## Bộ câu hỏi mẫu
 

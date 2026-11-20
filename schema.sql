@@ -21,6 +21,11 @@ CREATE TABLE IF NOT EXISTS players (
   FOREIGN KEY (room_code) REFERENCES rooms(code)
 );
 CREATE INDEX IF NOT EXISTS idx_players_room ON players(room_code, score DESC);
+CREATE TABLE IF NOT EXISTS player_presence (
+  player_id TEXT PRIMARY KEY REFERENCES players(id),
+  last_seen INTEGER NOT NULL,
+  kicked INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS answers (
   room_code TEXT NOT NULL,
   player_id TEXT NOT NULL,

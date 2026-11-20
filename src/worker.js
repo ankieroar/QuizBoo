@@ -1,13 +1,17 @@
-import { normalizeQuiz, publicQuestion, scoreAnswer, mediaPath } from './logic.js';
+import { normalizeQuiz, publicQuestion, scoreAnswer } from './logic.js';
 import { getAccount, register, verifyAccount, startSession, endSession } from './accounts.js';
 
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_MEDIA_BYTES = 15 * 1024 * 1024;
+const MAX_MULTIPART_BYTES = 150 * 1024 * 1024;
+const MEDIA_PART_BYTES = 8 * 1024 * 1024;
+const PRESENCE_WRITE_INTERVAL = 15_000;
+const ONLINE_WINDOW = 45_000;
 const MEDIA_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif', 'video/mp4': '.mp4', 'video/webm': '.webm', 'video/ogg': '.ogv' };
 
 const json = (data, status = 200, headers = {}) => new Response(JSON.stringify(data), { status, headers: { ...JSON_HEADERS, ...headers } });
-const error = (message, status = 400) => json({ error: message }, status);
+const error = (message, status = 400, code) => json({ error: message, code }, status);
 const token = () => crypto.randomUUID() + '-' + crypto.randomUUID();
 function roomCode() {
   const arr = crypto.getRandomValues(new Uint8Array(6));
@@ -18,6 +22,77 @@ async function bodyJson(request) {
   try { return await request.json(); } catch { throw new Error('Dữ liệu JSON không hợp lệ.'); }
 }
 const getRoom = (db, code) => db.prepare('SELECT * FROM rooms WHERE code = ?').bind(code).first();
+async function mediaSigningKey(room) {
+  return crypto.subtle.importKey('raw', new TextEncoder().encode(room.host_token), {name:'HMAC',hash:'SHA-256'}, false, ['sign','verify']);
+}
+async function mediaBytes(request, limit, exact = false) {
+  const length = request.headers.get('content-length');
+  const tooLarge = () => new HttpError('Kích thước dữ liệu tải lên không hợp lệ.', 413);
+  if (length !== null && (Number(length)>limit || (exact && Number(length)!==limit))) throw tooLarge();
+  if (!request.body) throw tooLarge();
+  const reader = request.body.getReader();
+  const bytes = new Uint8Array(length === null ? limit : Number(length));
+  let size = 0;
+  try {
+    while (true) {
+      const {done,value} = await reader.read();
+      if (done) break;
+      if (value.byteLength > bytes.length-size) {
+        await reader.cancel();
+        throw tooLarge();
+      }
+      bytes.set(value,size);
+      size += value.byteLength;
+    }
+  } finally { reader.releaseLock(); }
+  if (!size || (exact && size!==limit)) throw tooLarge();
+  return bytes.subarray(0,size);
+}
+async function multipartMedia(request, bucket, room, action) {
+  const signingKey = await mediaSigningKey(room);
+  if (action === 'start') {
+    const {size,type} = await bodyJson(request);
+    if (!Number.isInteger(size) || size<=MAX_MEDIA_BYTES || size>MAX_MULTIPART_BYTES) {
+      throw new HttpError('File vượt giới hạn upload hoặc không cần chia phần.', 413);
+    }
+    if (!Object.hasOwn(MEDIA_TYPES,type)) throw new HttpError('Định dạng file không được hỗ trợ.', 415);
+    const key = `rooms/${room.code}/${crypto.randomUUID()}${MEDIA_TYPES[type]}`;
+    const upload = await bucket.createMultipartUpload(key,{httpMetadata:{contentType:type}});
+    const session = btoa(JSON.stringify([key,upload.uploadId,size]));
+    const signature = await crypto.subtle.sign('HMAC',signingKey,new TextEncoder().encode(session));
+    return json({session:session+'.'+btoa(String.fromCharCode(...new Uint8Array(signature))),partBytes:MEDIA_PART_BYTES});
+  }
+  const [session,signature] = (request.headers.get('x-media-upload') || '').split('.');
+  let verified = false;
+  try {
+    verified = await crypto.subtle.verify('HMAC',signingKey,Uint8Array.from(atob(signature),c=>c.charCodeAt(0)),new TextEncoder().encode(session));
+  } catch { /* Reject malformed upload sessions. */ }
+  if (!verified) throw new HttpError('Phiên tải file không hợp lệ.', 400);
+  const [key,uploadId,size] = JSON.parse(atob(session));
+  const count = Math.ceil(size/MEDIA_PART_BYTES);
+  const upload = bucket.resumeMultipartUpload(key,uploadId);
+  if (action === 'abort') {
+    await upload.abort();
+    return json({ok:true});
+  }
+  if (action === 'part') {
+    const partNumber = Number(request.headers.get('x-media-part'));
+    if (!Number.isInteger(partNumber) || partNumber<1 || partNumber>count) throw new HttpError('Phần tải lên không hợp lệ.', 400);
+    const bytes = await mediaBytes(request,Math.min(MEDIA_PART_BYTES,size-(partNumber-1)*MEDIA_PART_BYTES),true);
+    return json(await upload.uploadPart(partNumber,bytes));
+  }
+  const {parts} = await bodyJson(request);
+  if (!Array.isArray(parts) || parts.length!==count ||
+      parts.some((part,index)=>part?.partNumber!==index+1 || typeof part.etag!=='string' || !part.etag)) {
+    throw new HttpError('File chưa được tải đủ các phần.', 400);
+  }
+  try { await upload.complete(parts); }
+  catch (e) {
+    const existing = await bucket.head(key);
+    if (existing?.size!==size) throw e;
+  }
+  return json({url:`/api/media/${key}`,size});
+}
 async function isHost(db, room, secret, request) {
   const legacyAccess = !!secret && secret === room.host_token;
   const account = await getAccount(db, request);
@@ -28,7 +103,7 @@ async function isHost(db, room, secret, request) {
 async function checkHost(db, room, secret, request) {
   if (!await isHost(db, room, secret, request)) throw new HttpError('Bạn không có quyền điều khiển phòng.', 403);
 }
-class HttpError extends Error { constructor(message, status) { super(message); this.status = status; } }
+class HttpError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
 async function refreshExpired(db, room) {
   if (room.phase === 'question' && Date.now() >= room.deadline) {
     await db.prepare("UPDATE rooms SET phase='reveal', updated_at=? WHERE code=? AND phase='question' AND deadline <= ?")
@@ -39,15 +114,37 @@ async function refreshExpired(db, room) {
 }
 async function getPlayer(db, code, secret) {
   if (!secret || typeof secret !== 'string') return null;
-  return db.prepare('SELECT id, name, score FROM players WHERE room_code=? AND player_token=?').bind(code, secret).first();
+  return db.prepare(`SELECT p.id, p.name, p.score, s.last_seen, s.kicked
+    FROM players p LEFT JOIN player_presence s ON s.player_id=p.id
+    WHERE p.room_code=? AND p.player_token=?`).bind(code, secret).first();
 }
-async function snapshot(db, room, credentials, request) {
+function checkPlayer(player) {
+  if (player?.kicked) throw new HttpError('Quản trò đã mời bạn ra khỏi phòng. Bạn có thể vào lại.', 403, 'PLAYER_KICKED');
+  if (!player) throw new HttpError('Chưa tham gia phòng hoặc phiên đăng nhập đã hết hạn.', 401);
+}
+function recordPresence(db, id, secret, now) {
+  return db.prepare(`INSERT INTO player_presence(player_id,last_seen)
+    SELECT id,? FROM players WHERE id=? AND player_token=?
+    ON CONFLICT(player_id) DO UPDATE SET last_seen=excluded.last_seen
+    WHERE player_presence.kicked=0
+      AND (player_presence.last_seen>=0 OR -player_presence.last_seen<excluded.last_seen)
+      AND player_presence.last_seen<=excluded.last_seen`).bind(now,id,secret).run();
+}
+async function snapshot(db, room, credentials, request, requestTime) {
   room = await refreshExpired(db, room);
   const host = !credentials.playerToken && await isHost(db, room, credentials.hostToken, request);
   const player = await getPlayer(db, room.code, credentials.playerToken);
-  if (!host && !player) throw new HttpError('Chưa tham gia phòng hoặc phiên đăng nhập đã hết hạn.', 401);
-  const players = await db.prepare('SELECT id, name, score FROM players WHERE room_code=? ORDER BY score DESC, joined_at ASC LIMIT 200')
-    .bind(room.code).all();
+  if (!host) checkPlayer(player);
+  const now = Date.now();
+  if (player && (player.last_seen === null || player.last_seen <= now - PRESENCE_WRITE_INTERVAL)) {
+    await recordPresence(db, player.id, credentials.playerToken, requestTime);
+  }
+  const players = await db.prepare(`SELECT p.id, p.name, p.score, a.player_id IS NOT NULL AS submitted
+    FROM players p JOIN player_presence s ON s.player_id=p.id
+    LEFT JOIN answers a ON a.room_code=p.room_code AND a.player_id=p.id AND a.question_index=?
+    WHERE p.room_code=? AND s.kicked=0 AND s.last_seen>?
+    ORDER BY p.score DESC, p.joined_at ASC LIMIT 200`)
+    .bind(room.question_index, room.code, now - ONLINE_WINDOW).all();
   const all = players.results || [];
   const quiz = JSON.parse(room.quiz_json);
   const idx = room.question_index;
@@ -55,12 +152,10 @@ async function snapshot(db, room, credentials, request) {
   const q = idx >= 0 ? quiz.questions[idx] : null;
   const answer = player && idx >= 0 ? await db.prepare('SELECT choice, is_correct, points FROM answers WHERE room_code=? AND player_id=? AND question_index=?')
     .bind(room.code, player.id, idx).first() : null;
-  const count = idx >= 0 ? await db.prepare('SELECT COUNT(*) AS total FROM answers WHERE room_code=? AND question_index=?')
-    .bind(room.code, idx).first() : { total: 0 };
   const data = {
     code: room.code, title: room.title, phase, index: idx,
     total: quiz.questions.length, count: all.length,
-    submitted: count.total, deadline: room.deadline,
+    submitted: all.filter(p => p.submitted).length, deadline: room.deadline,
     serverNow: Date.now(),
     question: q && phase !== 'ended' ? publicQuestion(q, phase === 'reveal') : null,
     leaderboard: all.map((p, i) => ({ id: p.id, name: p.name, score: p.score, rank: i + 1 })),
@@ -71,6 +166,7 @@ async function snapshot(db, room, credentials, request) {
   return data;
 }
 async function routeApi(request, env, url) {
+  const requestTime = Date.now();
   if (!env.DB) throw new HttpError('Thiếu binding DB. Xem README.md.', 503);
   const path = url.pathname;
   const origin = request.headers.get('origin');
@@ -139,7 +235,7 @@ async function routeApi(request, env, url) {
     }
     throw new HttpError('Không tạo được mã phòng, hãy thử lại.', 503);
   }
-  const match = path.match(/^\/api\/rooms\/([A-HJ-NP-Z2-9]{6})(?:\/(state|join|action|answer|quiz))?$/);
+  const match = path.match(/^\/api\/rooms\/([A-HJ-NP-Z2-9]{6})(?:\/(state|join|leave|action|answer|quiz))?$/);
   if (match) {
     const code = match[1], op = match[2] || '';
     if (request.method !== 'POST') return error('Chỉ hỗ trợ POST.', 405);
@@ -148,21 +244,50 @@ async function routeApi(request, env, url) {
     const data = await bodyJson(request);
     if (op === 'join') {
       const room = await refreshExpired(env.DB, room0);
-      if (room.phase !== 'lobby') throw new HttpError('Phòng đã bắt đầu. Vui lòng chờ phòng mới.', 409);
       const name = typeof data.name === 'string' ? data.name.trim().slice(0, 24) : '';
       if (!name) throw new HttpError('Hãy nhập tên người chơi.', 400);
-      const n = await env.DB.prepare('SELECT COUNT(*) AS total FROM players WHERE room_code=?').bind(code).first();
-      if (n.total >= 200) throw new HttpError('Phòng đã đủ 200 người.', 409);
-      if (data.playerToken) {
-        const existing = await getPlayer(env.DB, code, data.playerToken);
-        if (existing) return json({ playerToken: data.playerToken, playerId: existing.id });
+      const existing = await getPlayer(env.DB, code, data.playerToken);
+      const now = Date.now();
+      if (existing?.kicked) {
+        const secret = token();
+        const [updated] = await env.DB.batch([
+          env.DB.prepare(`UPDATE players SET player_token=? WHERE id=? AND player_token=?
+            AND EXISTS (SELECT 1 FROM player_presence WHERE player_id=players.id AND kicked=1)`)
+            .bind(secret,existing.id,data.playerToken),
+          env.DB.prepare(`UPDATE player_presence SET kicked=0,last_seen=? WHERE player_id=?
+            AND EXISTS (SELECT 1 FROM players WHERE id=player_presence.player_id AND player_token=?)`)
+            .bind(now,existing.id,secret)
+        ]);
+        if (!updated.meta.changes) throw new HttpError('Phiên tham gia đã thay đổi. Hãy thử lại.', 409);
+        return json({ playerToken: secret, playerId: existing.id });
+      }
+      if (room.phase !== 'lobby') throw new HttpError('Phòng đã bắt đầu. Vui lòng chờ phòng mới.', 409);
+      if (existing) {
+        await recordPresence(env.DB, existing.id, data.playerToken, now);
+        return json({ playerToken: data.playerToken, playerId: existing.id });
       }
       const id = crypto.randomUUID(), secret = token();
-      await env.DB.prepare('INSERT INTO players(id,room_code,player_token,name,score,joined_at) VALUES(?,?,?,?,0,?)')
-        .bind(id,code,secret,name,Date.now()).run();
+      const [insert] = await env.DB.batch([
+        env.DB.prepare(`INSERT INTO players(id,room_code,player_token,name,score,joined_at)
+          SELECT ?,code,?,?,0,? FROM rooms WHERE code=? AND phase='lobby'
+            AND (SELECT COUNT(*) FROM players WHERE room_code=rooms.code)<200`).bind(id,secret,name,now,code),
+        env.DB.prepare(`INSERT INTO player_presence(player_id,last_seen)
+          SELECT id,? FROM players WHERE id=?`).bind(now,id)
+      ]);
+      if (!insert.meta.changes) throw new HttpError('Phòng đã bắt đầu hoặc đã đủ 200 người.', 409);
       return json({ playerToken: secret, playerId: id }, 201);
     }
-    if (op === 'state') return json(await snapshot(env.DB, room0, data, request));
+    if (op === 'state') return json(await snapshot(env.DB, room0, data, request, requestTime));
+    if (op === 'leave') {
+      if (typeof data.playerToken !== 'string' || !data.playerToken) throw new HttpError('Thiếu khóa người chơi.', 401);
+      // A negative timestamp marks an explicit departure and blocks older polls from restoring presence.
+      await env.DB.prepare(`INSERT INTO player_presence(player_id,last_seen)
+        SELECT id,? FROM players WHERE room_code=? AND player_token=?
+        ON CONFLICT(player_id) DO UPDATE SET last_seen=excluded.last_seen
+        WHERE player_presence.kicked=0 AND abs(player_presence.last_seen)<=-excluded.last_seen`)
+        .bind(-requestTime,code,data.playerToken).run();
+      return json({ ok: true });
+    }
     if (op === 'quiz') {
       await checkHost(env.DB, room0, data.hostToken, request);
       if (room0.phase !== 'lobby') throw new HttpError('Chỉ chỉnh quiz khi còn ở sảnh chờ.', 409);
@@ -179,17 +304,34 @@ async function routeApi(request, env, url) {
       await checkHost(env.DB, room, data.hostToken, request);
       const quiz = JSON.parse(room.quiz_json), now = Date.now();
       const act = data.action;
-      if (act === 'start' && room.phase === 'lobby') {
+      if (act === 'kick') {
+        if (typeof data.playerId !== 'string' || !data.playerId) throw new HttpError('Thiếu mã người chơi.', 400);
+        const result = await env.DB.prepare(`INSERT INTO player_presence(player_id,last_seen,kicked)
+          SELECT id,0,1 FROM players WHERE room_code=? AND id=?
+          ON CONFLICT(player_id) DO UPDATE SET kicked=1,last_seen=0`).bind(code,data.playerId).run();
+        if (!result.meta.changes) throw new HttpError('Không tìm thấy người chơi trong phòng.', 404);
+      } else if (act === 'start' && room.phase === 'lobby') {
         await env.DB.prepare("UPDATE rooms SET phase='question',question_index=0,question_started_at=?,deadline=?+json_extract(quiz_json,'$.questions[0].time')*1000,updated_at=? WHERE code=? AND phase='lobby'")
           .bind(now, now, now, code).run();
-      } else if (act === 'next' && room.phase === 'reveal') {
+      } else if ((act === 'next' && room.phase === 'reveal') ||
+                 (act === 'skip' && ['question','reveal'].includes(room.phase))) {
+        const skipping = act === 'skip';
+        if (skipping && (data.index !== room.question_index || data.deadline !== room.deadline)) {
+          throw new HttpError('Câu hỏi đã đổi. Hãy đồng bộ lại phòng.', 409);
+        }
+        const currentQuestion = `WHERE code=? AND question_index=? AND question_started_at=?
+          AND (phase='reveal' OR (?=1 AND phase='question'))`;
+        const expected = [code,room.question_index,room.question_started_at,Number(skipping)];
+        let advanced;
         if (room.question_index + 1 >= quiz.questions.length) {
-          await env.DB.prepare("UPDATE rooms SET phase='ended',updated_at=? WHERE code=? AND phase='reveal'").bind(now,code).run();
+          advanced = await env.DB.prepare(`UPDATE rooms SET phase='ended',deadline=0,updated_at=? ${currentQuestion}`)
+            .bind(now,...expected).run();
         } else {
           const j = room.question_index + 1;
-          await env.DB.prepare("UPDATE rooms SET phase='question',question_index=?,question_started_at=?,deadline=?,updated_at=? WHERE code=? AND phase='reveal'")
-            .bind(j,now,now + quiz.questions[j].time * 1000,now,code).run();
+          advanced = await env.DB.prepare(`UPDATE rooms SET phase='question',question_index=?,question_started_at=?,deadline=?,updated_at=? ${currentQuestion}`)
+            .bind(j,now,now + quiz.questions[j].time * 1000,now,...expected).run();
         }
+        if (!advanced.meta.changes) throw new HttpError('Câu hỏi đã đổi. Hãy đồng bộ lại phòng.', 409);
       } else if (act === 'end' && ['lobby','question','reveal'].includes(room.phase)) {
         await env.DB.prepare("UPDATE rooms SET phase='ended',deadline=0,updated_at=? WHERE code=? AND phase IN ('lobby','question','reveal')").bind(now,code).run();
       } else if (act === 'reset' && room.phase === 'ended') {
@@ -204,9 +346,13 @@ async function routeApi(request, env, url) {
     if (op === 'answer') {
       const room = await refreshExpired(env.DB, room0);
       const player = await getPlayer(env.DB, code, data.playerToken);
-      if (!player) throw new HttpError('Bạn chưa đăng nhập vào phòng.', 401);
+      checkPlayer(player);
       const now = Date.now();
-      if (room.phase !== 'question' || now >= room.deadline) throw new HttpError('Câu hỏi đã đóng.', 409);
+      if (room.phase !== 'question' || now >= room.deadline ||
+          (data.index !== undefined && data.index !== room.question_index) ||
+          (data.deadline !== undefined && data.deadline !== room.deadline)) {
+        throw new HttpError('Câu hỏi đã đóng.', 409);
+      }
       const choice = data.choice;
       const quiz = JSON.parse(room.quiz_json), q = quiz.questions[room.question_index];
       const result = scoreAnswer(q, choice, now, room.question_started_at, room.deadline);
@@ -214,12 +360,15 @@ async function routeApi(request, env, url) {
       const [insert] = await env.DB.batch([
         env.DB.prepare(`INSERT OR IGNORE INTO answers(room_code,player_id,question_index,choice,is_correct,points,answered_at)
           SELECT code,?,question_index,?,?,?,? FROM rooms
-          WHERE code=? AND phase='question' AND question_index=? AND question_started_at=? AND deadline>?`)
-          .bind(player.id,choice,result.correct?1:0,result.points,now,code,room.question_index,room.question_started_at,now),
+          WHERE code=? AND phase='question' AND question_index=? AND question_started_at=? AND deadline>?
+            AND EXISTS (SELECT 1 FROM players p LEFT JOIN player_presence s ON s.player_id=p.id
+              WHERE p.id=? AND p.player_token=? AND COALESCE(s.kicked,0)=0)`)
+          .bind(player.id,choice,result.correct?1:0,result.points,now,code,room.question_index,room.question_started_at,now,player.id,data.playerToken),
         env.DB.prepare('UPDATE players SET score=(SELECT COALESCE(SUM(points),0) FROM answers WHERE room_code=? AND player_id=?) WHERE id=?')
           .bind(code,player.id,player.id)
       ]);
       if (!insert.meta.changes) {
+        checkPlayer(await getPlayer(env.DB, code, data.playerToken));
         const current = await getRoom(env.DB, code);
         if (current.phase !== 'question' || current.question_started_at !== room.question_started_at || current.question_index !== room.question_index) {
           throw new HttpError('Câu hỏi đã đóng.', 409);
@@ -229,7 +378,8 @@ async function routeApi(request, env, url) {
     }
     return error('Không tìm thấy API.', 404);
   }
-  if (path === '/api/media' && request.method === 'POST') {
+  const multipart = path.match(/^\/api\/media\/multipart\/(start|part|complete|abort)$/);
+  if ((path === '/api/media' || multipart) && request.method === 'POST') {
     if (!env.MEDIA) throw new HttpError('Chưa bật R2. Có thể dùng URL https:// hoặc xem hướng dẫn kích hoạt R2 trong README.', 503);
     const code = (request.headers.get('x-room-code') || '').toUpperCase();
     const secret = request.headers.get('x-host-token');
@@ -237,14 +387,14 @@ async function routeApi(request, env, url) {
     const room = await getRoom(env.DB, code);
     if (!room) throw new HttpError('Không tìm thấy phòng.', 404);
     await checkHost(env.DB, room, secret, request);
-    if (room.phase !== 'lobby') throw new HttpError('Chỉ tải media ở sảnh chờ.', 409);
+    if (room.phase !== 'lobby' && multipart?.[1]!=='abort') throw new HttpError('Chỉ tải media ở sảnh chờ.', 409);
+    if (multipart) return multipartMedia(request,env.MEDIA,room,multipart[1]);
     const length = Number(request.headers.get('content-length') || 0);
     if (length > MAX_MEDIA_BYTES) throw new HttpError('File quá lớn. Tối đa 15 MB.', 413);
     const type = (request.headers.get('content-type') || '').split(';')[0].toLowerCase();
-    const ext = MEDIA_TYPES[type];
+    const ext = Object.hasOwn(MEDIA_TYPES,type) ? MEDIA_TYPES[type] : null;
     if (!ext) throw new HttpError('Chỉ nhận PNG, JPG, WEBP, GIF, MP4, WEBM, OGG.', 415);
-    const bytes = await request.arrayBuffer();
-    if (!bytes.byteLength || bytes.byteLength > MAX_MEDIA_BYTES) throw new HttpError('File trống hoặc vượt 15 MB.', 413);
+    const bytes = await mediaBytes(request,MAX_MEDIA_BYTES);
     const key = `rooms/${code}/${crypto.randomUUID()}${ext}`;
     await env.MEDIA.put(key, bytes, { httpMetadata: { contentType: type } });
     return json({ url: `/api/media/${key}`, size: bytes.byteLength });
@@ -278,9 +428,9 @@ export default {
       if (url.pathname.startsWith('/api/')) return await routeApi(request, env, url);
       return env.ASSETS.fetch(request);
     } catch (e) {
-      if (e instanceof HttpError) return error(e.message, e.status);
-      if (e instanceof Error && /no such table:\s*(?:accounts|account_sessions|room_owners)\b/i.test(e.message)) {
-        return error('Cơ sở dữ liệu chưa được cập nhật để dùng tài khoản. Quản trị viên cần chạy npm run db:local hoặc npm run db:remote tùy môi trường.', 503);
+      if (e instanceof HttpError) return error(e.message, e.status, e.code);
+      if (e instanceof Error && /no such table:\s*(?:accounts|account_sessions|room_owners|player_presence)\b/i.test(e.message)) {
+        return error('Cơ sở dữ liệu chưa được cập nhật. Quản trị viên cần chạy npm run db:local hoặc npm run db:remote tùy môi trường.', 503);
       }
       if (e instanceof Error && /quiz|câu|đáp án|dữ liệu|thời gian|Lựa chọn/.test(e.message)) return error(e.message, 400);
       console.error('Worker error', e);

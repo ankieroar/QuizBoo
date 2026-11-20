@@ -9,6 +9,14 @@ const state = {
   uploadCache: new Map(), account: { username:null, rooms:[] }, hostActionPending:null
 };
 const symbols = ['▲','◆','●','■','✦','⬟','♥','⬢'];
+const MAX_MEDIA_BYTES = 150 * 1024 * 1024;
+const SINGLE_UPLOAD_BYTES = 15 * 1024 * 1024;
+const mediaTypes = {png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',gif:'image/gif',mp4:'video/mp4',webm:'video/webm',ogg:'video/ogg',ogv:'video/ogg'};
+function fileMediaType(file) {
+  if (!file) return '';
+  if (Object.values(mediaTypes).includes(file.type)) return file.type;
+  return mediaTypes[file.name.split('.').pop().toLowerCase()] || file.type || 'application/octet-stream';
+}
 let toastTimer;
 function toast(message, isError = false) {
   const el = $('#toast'); el.textContent = message; el.classList.toggle('error', isError); el.hidden = false;
@@ -17,6 +25,7 @@ function toast(message, isError = false) {
 function setView(view) {
   for (const id of ['home','editor','room']) $('#' + id).hidden = id !== view;
   const previousView = state.view;
+  if (previousView === 'room' && view !== 'room') notifyPlayerLeft();
   state.view = view;
   if (view === 'home' && (previousView === 'room' || state.editingRoom)) history.replaceState({}, '', location.pathname);
   if (view === 'home') {
@@ -29,6 +38,15 @@ function setView(view) {
     state.roomSession++; state.busy = false;
   }
   window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function notifyPlayerLeft() {
+  if (state.view !== 'room' || state.role !== 'player' || !state.playerToken) return;
+  fetch(`/api/rooms/${state.code}/leave`, {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({playerToken:state.playerToken}),
+    keepalive:true
+  }).catch(()=>{});
 }
 function renderSavedRooms() {
   const list = $('#saved-room-list');
@@ -108,7 +126,7 @@ function resolveMediaForPreview(s) {
   return '';
 }
 function isVideo(url, file) {
-  return !!(file?.type?.startsWith('video/') || /\.(?:mp4|webm|ogg|ogv)(?:\?.*)?$/i.test(url));
+  return !!(fileMediaType(file).startsWith('video/') || /\.(?:mp4|webm|ogg|ogv)(?:\?.*)?$/i.test(url));
 }
 function mediaMarkup(src, className = 'question-media', selectedFile = null) {
   const safe = resolveMediaForPreview(src);
@@ -236,7 +254,7 @@ function bindEditor() {
   for (const [inputId, field] of [['media-q-file','q'],['media-r-file','r']]) {
     $('#' + inputId).onchange = e => {
       const f = e.target.files?.[0]; if (!f) return;
-      if (f.size > 15 * 1024 * 1024) return toast('Mỗi media tối đa 15 MB.', true);
+      if (f.size > MAX_MEDIA_BYTES) return toast('Mỗi media tối đa 150 MB.', true);
       const key = fileKey(f), q = currentQ();
       if (field === 'q') q.media = key;
       else if (q.hidden) q.hidden.media = key;
@@ -293,6 +311,7 @@ async function onImport(e) {
     function replaceMedia(path) {
       if (!path || /^(https?:\/\/|local:)/i.test(path)) return path;
       const name=path.replace(/\\/g,'/').split('/').pop().toLowerCase(), file=mediaFiles.get(name);
+      if (file?.size > MAX_MEDIA_BYTES) throw Error(`${file.name} vượt 150 MB.`);
       return file ? fileKey(file) : path;
     }
     for (const q of draft.questions) {
@@ -324,7 +343,7 @@ async function api(path, data) {
   try { r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(data) }); }
   catch { throw Error('Không thể kết nối backend. Hãy chạy npm run dev hoặc kiểm tra mạng.'); }
   let result; try { result = await r.json(); } catch { throw Error('Máy chủ trả về dữ liệu không hợp lệ.'); }
-  if (!r.ok) throw Error(result.error || 'Lỗi API ('+r.status+')');
+  if (!r.ok) throw Object.assign(Error(result.error || 'Lỗi API ('+r.status+')'), {code:result.code});
   return result;
 }
 function strippedQuiz() {
@@ -336,6 +355,52 @@ function strippedQuiz() {
   }
   return copy;
 }
+async function sendMedia(path, headers, body, attempts = 1) {
+  for (let attempt = 1; ; attempt++) {
+    let response;
+    try { response = await fetch(path,{method:'POST',headers,body}); }
+    catch (e) { if (attempt>=attempts) throw e; }
+    if (response) {
+      const data = await response.json().catch(()=>null);
+      if (response.ok && data) return data;
+      const retryable = response.status===408 || response.status===429 || response.status>=500;
+      if (!retryable || attempt>=attempts) throw Error(data?.error || `HTTP ${response.status}`);
+    }
+    await new Promise(resolve=>setTimeout(resolve,500*2**(attempt-1)));
+  }
+}
+async function uploadMedia(file, room) {
+  const type = fileMediaType(file);
+  const headers = {'X-Room-Code':room.code,'X-Host-Token':room.hostToken};
+  if (file.size<=SINGLE_UPLOAD_BYTES) {
+    return sendMedia('/api/media',{...headers,'Content-Type':type},file);
+  }
+  const base = '/api/media/multipart/';
+  const jsonHeaders = {...headers,'Content-Type':'application/json'};
+  const {session,partBytes} = await sendMedia(base+'start',jsonHeaders,JSON.stringify({size:file.size,type}));
+  const sessionHeaders = {...headers,'X-Media-Upload':session};
+  const parts = new Array(Math.ceil(file.size/partBytes));
+  let next = 0, uploaded = 0, failure;
+  async function sendParts() {
+    while (!failure && next<parts.length) {
+      const index = next++;
+      const chunk = file.slice(index*partBytes,(index+1)*partBytes);
+      try {
+        parts[index] = await sendMedia(base+'part',{...sessionHeaders,'X-Media-Part':String(index+1)},chunk,4);
+        uploaded += chunk.size;
+        $('#draft-status').textContent = `Đang tải ${file.name} · ${Math.floor(uploaded/file.size*100)}%`;
+      } catch (e) { failure = e; }
+    }
+  }
+  try {
+    await Promise.all([sendParts(),sendParts()]);
+    if (failure) throw failure;
+    return await sendMedia(base+'complete',{...sessionHeaders,'Content-Type':'application/json'},JSON.stringify({parts}),4);
+  } catch (e) {
+    sendMedia(base+'abort',sessionHeaders,null).catch(()=>{});
+    throw e;
+  }
+}
 async function createRoom() {
   try { validateDraft(); } catch(e) { return toast(e.message, true); }
   const editingRoom = state.editingRoom;
@@ -343,6 +408,12 @@ async function createRoom() {
   button.textContent = editingRoom ? 'Đang lưu...' : 'Đang tạo phòng...';
   try {
     const quiz = structuredClone(state.draft);
+    const refs = [...new Set(quiz.questions.flatMap(q=>[q.media,q.revealMedia,q.hidden?.media].filter(s=>state.files.has(s))))];
+    if (refs.some(ref=>!state.uploadCache.has(ref))) {
+      const response = await fetch('/api/health', {cache:'no-store'});
+      if (!response.ok) throw Error('Không kiểm tra được kết nối R2.');
+      if (!(await response.json()).r2) throw Error('Máy chủ chưa kết nối R2. Cần cấu hình binding MEDIA để tải file.');
+    }
     let room = editingRoom || state.pendingRoom;
     if (!room) {
       room = await api('/api/rooms', { quiz: strippedQuiz(), requireAccount:!!state.account.username });
@@ -352,15 +423,16 @@ async function createRoom() {
         localStorage.setItem('tq-room-title-'+room.code, state.draft.title.trim());
       }
     }
-    const refs = [...new Set(quiz.questions.flatMap(q=>[q.media,q.revealMedia,q.hidden?.media].filter(s=>state.files.has(s))))];
     if (refs.length) toast(`Đang tải ${refs.length} media lên R2...`);
     for (const ref of refs) {
       if (state.uploadCache.has(ref)) continue;
       const file = state.files.get(ref);
-      const r = await fetch('/api/media', { method:'POST', headers:{'Content-Type':file.type,'X-Room-Code':room.code,'X-Host-Token':room.hostToken},body:file });
-      const data = await r.json();
-      if(!r.ok) throw Error(`Không upload được ${file.name}: ${data.error || r.status}`);
-      state.uploadCache.set(ref, data.url);
+      $('#draft-status').textContent = `Đang tải ${file.name}…`;
+      try {
+        const data = await uploadMedia(file, room);
+        if (!data?.url) throw Error('Máy chủ chưa trả về địa chỉ file.');
+        state.uploadCache.set(ref, data.url);
+      } catch (e) { throw Error(`Không tải được ${file.name}: ${e.message}`); }
     }
     function resolved(v) { return state.uploadCache.get(v) || v || ''; }
     for (const q of quiz.questions) {
@@ -395,7 +467,11 @@ async function connectRoom(code, role, secret) {
   $('#stage').innerHTML='<div class="stage-lobby"><h2>Đang kết nối phòng...</h2></div>';
   try { await poll(); }
   catch(e) {
-    if (session === state.roomSession) { setView('home'); toast(e.message, true); }
+    if (session === state.roomSession) {
+      if (e.code === 'PLAYER_KICKED') $('#join-code').value=code;
+      setView('home');
+      toast(e.message, true);
+    }
     return;
   }
   if (session !== state.roomSession) return;
@@ -415,6 +491,12 @@ async function poll() {
     renderRoom();
   } catch(e) {
     if (session !== state.roomSession) return;
+    if (e.code === 'PLAYER_KICKED') {
+      $('#join-code').value=state.code;
+      setView('home');
+      toast(e.message,true);
+      return;
+    }
     $('#connection-indicator').textContent='● Mất kết nối, đang thử lại...'; throw e;
   }
   finally { if (session === state.roomSession) state.busy=false; }
@@ -437,15 +519,17 @@ function renderRoom() {
   $('#room-code').textContent=d.code;
   $('#phase-badge').textContent=phaseName(d.phase);
   $('#room-hint').textContent=({ lobby:'Mời bạn bè vào phòng rồi bắt đầu!', question:`Câu ${d.index+1}/${d.total} · Đã chốt ${d.submitted}/${d.count} người`, reveal:`Câu ${d.index+1}/${d.total} · Đáp án đã được công bố!`, ended:'Cùng xem kết quả chung cuộc!' })[d.phase];
-  $('#player-count').textContent=d.count+' người';
-  const key=[d.phase,d.index,d.me?.answer?.choice ?? 'none',d.host?'host':'player'].join(':');
+  $('#player-count').textContent=d.count+' online';
+  const leader=d.phase==='ended' ? d.leaderboard[0] : null;
+  const key=[d.phase,d.index,d.me?.answer?.choice ?? 'none',d.host?'host':'player',
+    d.phase==='lobby' ? d.count : '',leader?.id,leader?.score].join(':');
   if(state.stageKey!==key) { state.stageKey=key; renderStage(d); }
   renderRanking(d);
   renderHostActions(d);
   updateTimer();
 }
 function renderRanking(d) {
-  $('#rankings').innerHTML=d.leaderboard.length?d.leaderboard.map((p,i)=>`<div class="rank-row ${d.me?.id===p.id?'is-me':''}"><span class="rank-order">${i===0?'🥇':i===1?'🥈':i===2?'🥉':p.rank}</span><span class="rank-avatar">${esc((p.name||'?')[0].toUpperCase())}</span><span class="rank-name" title="${esc(p.name)}">${esc(p.name)}${d.me?.id===p.id?' (bạn)':''}</span><span class="rank-score">${p.score.toLocaleString('vi-VN')}đ</span></div>`).join(''):'<div class="empty-rank">Chưa ai vào phòng.<br/>Hãy chia sẻ mã và bắt đầu!</div>';
+  $('#rankings').innerHTML=d.leaderboard.length?d.leaderboard.map((p,i)=>`<div class="rank-row ${d.me?.id===p.id?'is-me':''}"><span class="rank-order">${i===0?'🥇':i===1?'🥈':i===2?'🥉':p.rank}</span><span class="rank-avatar">${esc((p.name||'?')[0].toUpperCase())}</span><span class="rank-name" title="${esc(p.name)}">${esc(p.name)}${d.me?.id===p.id?' (bạn)':''}</span><span class="rank-score">${p.score.toLocaleString('vi-VN')}đ</span>${d.host?`<button class="copy-mini" type="button" data-kick-player="${esc(p.id)}" aria-label="Mời ${esc(p.name)} ra khỏi phòng"${state.hostActionPending===state.roomSession?' disabled':''}>Kick</button>`:''}</div>`).join(''):'<div class="empty-rank">Chưa có người chơi online.</div>';
 }
 function renderStage(d) {
   const stage=$('#stage');
@@ -490,27 +574,32 @@ function renderHostActions(d) {
   if(!d.host) return;
   let label='',button='',act='';
   if(d.phase==='lobby') {label='Đang ở sảnh chờ';button='▶ Bắt đầu quiz';act='start';}
-  else if(d.phase==='question') {label=`Đã trả lời ${d.submitted}/${d.count} người · Đáp án sẽ hiện khi hết giờ`;}
+  else if(d.phase==='question') {
+    label=`Đã trả lời ${d.submitted}/${d.count} người · Đáp án sẽ hiện khi hết giờ`;
+    button=d.index+1>=d.total?'Bỏ qua câu cuối':'Bỏ qua câu →';
+    act='skip';
+  }
   else if(d.phase==='reveal') {label=`Đã công bố câu ${d.index+1}`;button=d.index+1>=d.total?'🏁 Kết thúc':'Câu tiếp theo →';act='next';}
   else {label='Đã kết thúc trận';button='↺ Chơi lại';act='reset';}
   const editButton = d.phase === 'lobby' ? '<button class="button subtle" type="button" id="host-edit-quiz">Sửa bộ câu hỏi</button>' : '';
-  const endButton = d.phase !== 'ended' && !(d.phase === 'reveal' && d.index + 1 >= d.total)
+  const endButton = d.phase !== 'ended' && !(d.phase !== 'lobby' && d.index + 1 >= d.total)
     ? '<button class="button subtle" type="button" id="host-end-room">Kết thúc ngay</button>' : '';
   container.innerHTML=`<div><strong>🎛 Bảng điều khiển quản trò</strong><p>${esc(label)}</p></div>${editButton}${endButton}${act?`<button class="button primary" type="button" id="host-main-action">${button}</button>`:''}`;
   if(state.hostActionPending === state.roomSession) $$('button',container).forEach(button=>button.disabled=true);
-  if(act) $('#host-main-action').onclick=()=>hostAction(act);
+  if(act) $('#host-main-action').onclick=()=>hostAction(act,act==='skip'?{index:d.index,deadline:d.deadline}:{});
   if(editButton) $('#host-edit-quiz').onclick=()=>openEditor(importDraft(d.hostQuiz), {code:d.code, hostToken:state.hostToken});
   if(endButton) $('#host-end-room').onclick=()=>{
     if(window.confirm('Kết thúc phòng ngay cho tất cả người chơi? Điểm hiện tại sẽ được giữ lại.')) hostAction('end');
   };
 }
-async function hostAction(action) {
+async function hostAction(action, details = {}) {
   const session=state.roomSession;
   if(state.hostActionPending === session) return;
   state.hostActionPending=session;
   renderHostActions(state.room);
+  if (details.playerId) renderRanking(state.room);
   try {
-    await api(`/api/rooms/${state.code}/action`,{hostToken:state.hostToken,action});
+    await api(`/api/rooms/${state.code}/action`,{hostToken:state.hostToken,action,...details});
     if(session !== state.roomSession) return;
     state.stageKey='';
     await poll();
@@ -518,20 +607,31 @@ async function hostAction(action) {
     if(session === state.roomSession) toast(e.message,true);
   } finally {
     if(state.hostActionPending === session) state.hostActionPending=null;
-    if(session === state.roomSession) renderHostActions(state.room);
+    if(session === state.roomSession) {
+      renderHostActions(state.room);
+      if (details.playerId) renderRanking(state.room);
+    }
   }
 }
 async function submitAnswer(choice) {
   if(state.role!=='player' || state.room?.phase!=='question' || state.room?.me?.answer || timerLeft()<=0) return;
+  const {index,deadline}=state.room, session=state.roomSession;
   $$('.answer-choice', $('#stage')).forEach(b=>b.disabled=true);
   try {
-    await api(`/api/rooms/${state.code}/answer`,{playerToken:state.playerToken,choice});
+    await api(`/api/rooms/${state.code}/answer`,{playerToken:state.playerToken,choice,index,deadline});
+    if(session!==state.roomSession || state.room?.phase!=='question' ||
+       state.room.index!==index || state.room.deadline!==deadline) return;
     // Cho phản hồi tức thời, máy chủ vẫn tự tính điểm và xác minh đáp án.
     state.room.me.answer={choice, correct:false, points:0}; state.stageKey=''; renderStage(state.room);
     await poll();
-  } catch(e) {toast(e.message,true);state.stageKey='';await pollSafe();}
+  } catch(e) {
+    if(session!==state.roomSession) return;
+    toast(e.message,true);state.stageKey='';await pollSafe();
+  }
 }
 function initRoom() {
+  window.addEventListener('pagehide',notifyPlayerLeft);
+  window.addEventListener('pageshow',e=>{ if (e.persisted) pollSafe(); });
   $('#account-form').onsubmit=async e=>{
     e.preventDefault();
     const form=e.currentTarget;
@@ -583,6 +683,12 @@ function initRoom() {
   };
   $('#copy-code').onclick=()=>copyText(state.code);
   $('#copy-link').onclick=()=>copyText(roomJoinLink());
+  $('#rankings').onclick=e=>{
+    const playerId=e.target.closest('[data-kick-player]')?.dataset.kickPlayer;
+    if (!playerId || !state.room?.host) return;
+    const player=state.room.leaderboard.find(p=>p.id===playerId);
+    if (player && window.confirm(`Mời ${player.name} ra khỏi phòng?`)) hostAction('kick',{playerId});
+  };
   $('#room-exit').onclick=()=>setView('home');
   $('#join-code').oninput=e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z2-9]/g,'').slice(0,6);
   $('#join-form').onsubmit=async e=>{

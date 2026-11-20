@@ -4,9 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "wrangler dev --local",
+    "dev": "wrangler dev --config wrangler.example.jsonc --local --persist-to .wrangler/local-test",
     "deploy": "wrangler deploy",
-    "db:local": "wrangler d1 execute troll-quiz-db --local --file=./schema.sql",
+    "db:local": "wrangler d1 execute troll-quiz-db --config wrangler.example.jsonc --local --persist-to .wrangler/local-test --file=./schema.sql",
     "db:remote": "wrangler d1 execute troll-quiz-db --remote --file=./schema.sql",
     "check": "node --check src/worker.js && node --check public/app.js && node --test tests/*.test.js"
   },

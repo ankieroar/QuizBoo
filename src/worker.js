@@ -4,6 +4,8 @@ import { getAccount, register, verifyAccount, startSession, endSession } from '.
 const JSON_HEADERS = { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' };
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const MAX_MEDIA_BYTES = 15 * 1024 * 1024;
+const QUESTION_COUNTDOWN_MS = 3_000;
+const RESULTS_HOLD_MS = 6_000;
 const MAX_MULTIPART_BYTES = 150 * 1024 * 1024;
 const MEDIA_PART_BYTES = 8 * 1024 * 1024;
 const PRESENCE_WRITE_INTERVAL = 15_000;
@@ -104,10 +106,21 @@ async function checkHost(db, room, secret, request) {
   if (!await isHost(db, room, secret, request)) throw new HttpError('Bạn không có quyền điều khiển phòng.', 403);
 }
 class HttpError extends Error { constructor(message, status, code) { super(message); this.status = status; this.code = code; } }
+async function publishScores(db, room, phase, transition) {
+  // Publish totals with the phase change. A skipped question keeps its answers for the next result.
+  const [changed] = await db.batch([transition, db.prepare(`UPDATE players SET score=totals.points
+    FROM (SELECT player_id,SUM(points) AS points FROM answers WHERE room_code=? AND points>0 GROUP BY player_id) totals
+    WHERE players.room_code=? AND players.id=totals.player_id AND players.score<>totals.points
+      AND EXISTS (SELECT 1 FROM rooms WHERE code=? AND phase=? AND question_index=? AND question_started_at=?)`)
+    .bind(room.code,room.code,room.code,phase,room.question_index,room.question_started_at)]);
+  return changed;
+}
 async function refreshExpired(db, room) {
-  if (room.phase === 'question' && Date.now() >= room.deadline) {
-    await db.prepare("UPDATE rooms SET phase='reveal', updated_at=? WHERE code=? AND phase='question' AND deadline <= ?")
-      .bind(Date.now(), room.code, Date.now()).run();
+  const now = Date.now();
+  if (room.phase === 'question' && now >= room.deadline) {
+    await publishScores(db,room,'reveal',db.prepare(`UPDATE rooms SET phase='reveal',updated_at=?
+      WHERE code=? AND phase='question' AND question_index=? AND question_started_at=? AND deadline<=?`)
+      .bind(now,room.code,room.question_index,room.question_started_at,now));
     room = await getRoom(db, room.code);
   }
   return room;
@@ -143,7 +156,7 @@ async function snapshot(db, room, credentials, request, requestTime) {
     FROM players p JOIN player_presence s ON s.player_id=p.id
     LEFT JOIN answers a ON a.room_code=p.room_code AND a.player_id=p.id AND a.question_index=?
     WHERE p.room_code=? AND s.kicked=0 AND s.last_seen>?
-    ORDER BY p.score DESC, p.joined_at ASC LIMIT 200`)
+    ORDER BY p.score DESC, p.joined_at ASC, p.id ASC LIMIT 200`)
     .bind(room.question_index, room.code, now - ONLINE_WINDOW).all();
   const all = players.results || [];
   const quiz = JSON.parse(room.quiz_json);
@@ -156,10 +169,14 @@ async function snapshot(db, room, credentials, request, requestTime) {
     code: room.code, title: room.title, phase, index: idx,
     total: quiz.questions.length, count: all.length,
     submitted: all.filter(p => p.submitted).length, deadline: room.deadline,
-    serverNow: Date.now(),
+    startsAt: room.question_started_at,
+    resultsUntil: phase==='reveal' ? room.updated_at + RESULTS_HOLD_MS : 0,
+    serverReceivedAt: requestTime, serverNow: Date.now(),
     question: q && phase !== 'ended' ? publicQuestion(q, phase === 'reveal') : null,
     leaderboard: all.map((p, i) => ({ id: p.id, name: p.name, score: p.score, rank: i + 1 })),
-    me: player ? { id: player.id, name: player.name, score: player.score, answer: answer ? { choice: answer.choice, correct: !!answer.is_correct, points: answer.points } : null } : null,
+    me: player ? { id: player.id, name: player.name, score: player.score,
+      answer: answer ? (phase==='question' ? {choice:answer.choice}
+        : {choice:answer.choice, correct:!!answer.is_correct, points:answer.points}) : null } : null,
     host
   };
   if (host) data.hostQuiz = quiz;
@@ -311,11 +328,24 @@ async function routeApi(request, env, url) {
           ON CONFLICT(player_id) DO UPDATE SET kicked=1,last_seen=0`).bind(code,data.playerId).run();
         if (!result.meta.changes) throw new HttpError('Không tìm thấy người chơi trong phòng.', 404);
       } else if (act === 'start' && room.phase === 'lobby') {
+        const startsAt=now + QUESTION_COUNTDOWN_MS;
         await env.DB.prepare("UPDATE rooms SET phase='question',question_index=0,question_started_at=?,deadline=?+json_extract(quiz_json,'$.questions[0].time')*1000,updated_at=? WHERE code=? AND phase='lobby'")
-          .bind(now, now, now, code).run();
+          .bind(startsAt, startsAt, now, code).run();
+      } else if (act === 'close-question') {
+        if (room.phase!=='question' || data.index!==room.question_index || data.deadline!==room.deadline) {
+          throw new HttpError('Câu hỏi đã đóng hoặc đã đổi.', 409);
+        }
+        if (now<room.question_started_at) throw new HttpError('Câu hỏi chưa bắt đầu.', 409);
+        const closed = await publishScores(env.DB,room,'reveal',env.DB.prepare(`UPDATE rooms SET phase='reveal',updated_at=?
+          WHERE code=? AND phase='question' AND question_index=? AND question_started_at=?`)
+          .bind(now,code,room.question_index,room.question_started_at));
+        if (!closed.meta.changes) throw new HttpError('Câu hỏi đã đóng hoặc đã đổi.', 409);
       } else if ((act === 'next' && room.phase === 'reveal') ||
                  (act === 'skip' && ['question','reveal'].includes(room.phase))) {
         const skipping = act === 'skip';
+        if (room.phase==='reveal' && now<room.updated_at+RESULTS_HOLD_MS) {
+          throw new HttpError('Chờ mọi người xem bảng điểm trước khi chuyển câu.', 409);
+        }
         if (skipping && (data.index !== room.question_index || data.deadline !== room.deadline)) {
           throw new HttpError('Câu hỏi đã đổi. Hãy đồng bộ lại phòng.', 409);
         }
@@ -324,16 +354,20 @@ async function routeApi(request, env, url) {
         const expected = [code,room.question_index,room.question_started_at,Number(skipping)];
         let advanced;
         if (room.question_index + 1 >= quiz.questions.length) {
-          advanced = await env.DB.prepare(`UPDATE rooms SET phase='ended',deadline=0,updated_at=? ${currentQuestion}`)
-            .bind(now,...expected).run();
+          advanced = await publishScores(env.DB,room,'ended',env.DB.prepare(`UPDATE rooms SET phase='ended',deadline=0,updated_at=? ${currentQuestion}`)
+            .bind(now,...expected));
         } else {
           const j = room.question_index + 1;
+          const startsAt=now + QUESTION_COUNTDOWN_MS;
           advanced = await env.DB.prepare(`UPDATE rooms SET phase='question',question_index=?,question_started_at=?,deadline=?,updated_at=? ${currentQuestion}`)
-            .bind(j,now,now + quiz.questions[j].time * 1000,now,...expected).run();
+            .bind(j,startsAt,startsAt + quiz.questions[j].time * 1000,now,...expected).run();
         }
         if (!advanced.meta.changes) throw new HttpError('Câu hỏi đã đổi. Hãy đồng bộ lại phòng.', 409);
       } else if (act === 'end' && ['lobby','question','reveal'].includes(room.phase)) {
-        await env.DB.prepare("UPDATE rooms SET phase='ended',deadline=0,updated_at=? WHERE code=? AND phase IN ('lobby','question','reveal')").bind(now,code).run();
+        const ended = await publishScores(env.DB,room,'ended',env.DB.prepare(`UPDATE rooms SET phase='ended',deadline=0,updated_at=?
+          WHERE code=? AND phase IN ('lobby','question','reveal') AND question_index=? AND question_started_at=?`)
+          .bind(now,code,room.question_index,room.question_started_at));
+        if (!ended.meta.changes) throw new HttpError('Trạng thái phòng đã đổi. Hãy đồng bộ lại phòng.', 409);
       } else if (act === 'reset' && room.phase === 'ended') {
         await env.DB.batch([
           env.DB.prepare('DELETE FROM answers WHERE room_code=?').bind(code),
@@ -348,6 +382,7 @@ async function routeApi(request, env, url) {
       const player = await getPlayer(env.DB, code, data.playerToken);
       checkPlayer(player);
       const now = Date.now();
+      if (room.phase==='question' && now<room.question_started_at) throw new HttpError('Câu hỏi chưa bắt đầu.', 409);
       if (room.phase !== 'question' || now >= room.deadline ||
           (data.index !== undefined && data.index !== room.question_index) ||
           (data.deadline !== undefined && data.deadline !== room.deadline)) {
@@ -356,17 +391,12 @@ async function routeApi(request, env, url) {
       const choice = data.choice;
       const quiz = JSON.parse(room.quiz_json), q = quiz.questions[room.question_index];
       const result = scoreAnswer(q, choice, now, room.question_started_at, room.deadline);
-      // Điểm lấy tổng từ bảng answers, vì vậy gửi trùng không được cộng điểm 2 lần.
-      const [insert] = await env.DB.batch([
-        env.DB.prepare(`INSERT OR IGNORE INTO answers(room_code,player_id,question_index,choice,is_correct,points,answered_at)
+      const insert = await env.DB.prepare(`INSERT OR IGNORE INTO answers(room_code,player_id,question_index,choice,is_correct,points,answered_at)
           SELECT code,?,question_index,?,?,?,? FROM rooms
           WHERE code=? AND phase='question' AND question_index=? AND question_started_at=? AND deadline>?
             AND EXISTS (SELECT 1 FROM players p LEFT JOIN player_presence s ON s.player_id=p.id
               WHERE p.id=? AND p.player_token=? AND COALESCE(s.kicked,0)=0)`)
-          .bind(player.id,choice,result.correct?1:0,result.points,now,code,room.question_index,room.question_started_at,now,player.id,data.playerToken),
-        env.DB.prepare('UPDATE players SET score=(SELECT COALESCE(SUM(points),0) FROM answers WHERE room_code=? AND player_id=?) WHERE id=?')
-          .bind(code,player.id,player.id)
-      ]);
+          .bind(player.id,choice,result.correct?1:0,result.points,now,code,room.question_index,room.question_started_at,now,player.id,data.playerToken).run();
       if (!insert.meta.changes) {
         checkPlayer(await getPlayer(env.DB, code, data.playerToken));
         const current = await getRoom(env.DB, code);

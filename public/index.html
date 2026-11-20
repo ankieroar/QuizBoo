@@ -8,23 +8,21 @@
   <title>QuizBoo — Troll Quiz Live</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <link rel="stylesheet" href="/style.css" />
-  <script src="/app.js" defer></script>
+  <script src="/app.js" type="module"></script>
 </head>
 <body>
   <div class="page-glow glow-a" aria-hidden="true"></div><div class="page-glow glow-b" aria-hidden="true"></div>
   <header class="topnav wrap">
     <a class="brand" href="/" aria-label="QuizBoo trang chủ"><span class="brand-icon">✳</span><span>quiz<span class="brand-em">boo!</span></span></a>
-    <span class="nav-tag"><span class="dot"></span> QUIZ ROOM · LIVE</span>
+    <button class="nav-back" id="sound-toggle" type="button" aria-pressed="true" hidden>Âm thanh</button>
     <button class="nav-back" id="top-home" type="button" hidden>← Trang chủ</button>
   </header>
   <main class="wrap">
     <section id="home" class="view">
       <div class="hero">
         <div class="hero-copy">
-          <span class="eyebrow"><span class="spark">✦</span> A LITTLE CHAOS. A LOT OF FUN.</span>
           <h1>Quiz vui thôi,<br><em>đừng tin đáp án.</em><span class="scribble">↝</span></h1>
           <p>Trò chơi trắc nghiệm có plot twist. Chơi cùng bạn bè theo mã phòng và theo dõi bảng xếp hạng trực tiếp.</p>
-          <div class="hero-pills"><span>✦ 2–8 lựa chọn</span><span>◈ Ảnh · GIF · Video</span><span>♛ BXH trực tiếp</span></div>
         </div>
         <div class="hero-art" aria-hidden="true">
           <div class="art-sticker art-star">✦</div>
@@ -66,7 +64,7 @@
     </section>
 
     <section id="editor" class="view" hidden>
-      <div class="section-heading"><div><span class="eyebrow">✳ CREATOR STUDIO</span><h1>Thiết kế quiz <span class="accent-text">của bạn.</span></h1><p>Tạo một chút bất ngờ. Mọi thứ đều có thể chỉnh trước khi mở room.</p></div><button type="button" class="button soft" id="back-editor">← Quay lại</button></div>
+      <div class="section-heading"><div><h1>Thiết kế quiz <span class="accent-text">của bạn.</span></h1></div><button type="button" class="button soft" id="back-editor">Quay lại</button></div>
       <div class="editor-grid">
         <aside class="editor-sidebar">
           <div class="panel"><h3>Thông tin chung</h3><label class="field-label" for="quiz-title">Tên quiz</label><input id="quiz-title" maxlength="90" placeholder="Tên quiz thú vị..." />
@@ -76,8 +74,8 @@
           <div class="panel questions-panel"><div class="flex-between"><h3>Danh sách câu hỏi</h3><span id="q-counter" class="count-tag">0</span></div><div id="question-list" class="question-list"></div><button type="button" id="add-question" class="button add-button full">＋ Thêm câu hỏi</button><button type="button" id="shuffle-questions" class="button subtle full">Xáo trộn thứ tự câu</button></div>
         </aside>
         <div class="editor-main">
-          <div class="panel editor-form"><div class="flex-between"><span class="eyebrow">QUESTION BUILDER</span><button type="button" class="delete-button" id="delete-question">⌫ Xoá câu</button></div>
-            <div class="editor-title-line"><h2 id="editor-q-heading">Câu 01</h2><span class="tag-soft">Tùy chọn nâng cao</span></div>
+          <div class="panel editor-form">
+            <div class="editor-title-line"><h2 id="editor-q-heading">Câu 01</h2><button type="button" class="delete-button" id="delete-question">Xoá câu</button></div>
             <label class="field-label" for="q-text">Nội dung câu hỏi</label><textarea id="q-text" rows="3" maxlength="600" placeholder="Đố mọi người một điều bất ngờ..."></textarea>
             <div class="flex-between answers-heading"><label class="field-label">Danh sách lựa chọn (2–8)</label><button type="button" id="add-option" class="text-link button-link">＋ Thêm lựa chọn</button></div>
             <div id="options-editor" class="options-editor"></div>
@@ -96,8 +94,21 @@
     <section id="room" class="view" hidden>
       <div class="room-top"><div><span class="eyebrow" id="room-role">LIVE ROOM</span><h1 id="room-title">Quiz room</h1></div><div class="room-code-card"><small>MÃ PHÒNG</small><strong id="room-code">------</strong><button type="button" class="copy-mini" id="copy-code">⧉ Copy mã</button></div></div>
       <div class="room-notice"><span id="phase-badge" class="phase-badge">SẢNH CHỜ</span><span id="room-hint">Mời bạn bè cùng vào phòng!</span><button type="button" class="link-white" id="copy-link">Sao chép link mời ↗</button></div>
-      <div class="room-grid"><div class="stage-column"><div id="stage" class="stage"></div><div id="host-actions" class="host-actions" hidden></div></div><aside class="ranking-panel"><div class="ranking-head"><div><span>THE LEADERBOARD</span><h2>🏆 Bảng xếp hạng</h2></div><span id="player-count" class="player-pill">0 người</span></div><div id="rankings" class="rankings"></div><div class="ranking-foot"><span>⚡</span> Cập nhật tự động khi mọi người chơi</div></aside></div>
-      <div class="room-footer"><button type="button" id="room-exit" class="button soft">← Về trang chủ</button><span id="connection-indicator">● Đang kết nối...</span></div>
+      <div class="room-grid">
+        <div class="stage-column">
+          <div id="stage-viewport" class="stage-viewport"><div id="stage" class="stage"></div></div>
+          <div id="host-actions" class="host-actions" hidden></div>
+        </div>
+        <aside id="ranking-panel" class="ranking-panel" aria-labelledby="ranking-title" hidden>
+          <div class="ranking-head"><h2 id="ranking-title" tabindex="-1">Bảng xếp hạng</h2><span id="player-count" class="player-pill">0 người</span></div>
+          <div id="rankings" class="rankings"><div id="empty-ranking" class="empty-rank">Chưa có người chơi online.</div></div>
+          <div id="final-actions" class="final-actions" hidden>
+            <button type="button" class="button soft" data-room-exit>Về trang chủ</button>
+            <button type="button" class="button primary" id="stay-in-room">Ở lại phòng</button>
+          </div>
+        </aside>
+      </div>
+      <div class="room-footer"><button type="button" id="room-exit" class="button soft" data-room-exit>Về trang chủ</button><button type="button" id="show-final-ranking" class="button subtle" hidden>Xem kết quả</button><span id="connection-indicator">● Đang kết nối...</span></div>
     </section>
   </main>
   <div id="toast" role="status" aria-live="polite" class="toast" hidden></div>

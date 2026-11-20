@@ -61,19 +61,32 @@ test('full room lifecycle, timed reveals, avoid double points',async t=>{
   assert.equal(stage.phase,'question');
   assert.equal(stage.question.solution,undefined);
   assert.equal(stage.question.answer,undefined);
+  assert.equal(stage.startsAt,103_000);
+  assert.equal(stage.deadline-stage.startsAt,20_000);
+  assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken,choice:1})).status,409);
+  t.mock.timers.tick(2_999);
+  assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken,choice:1})).status,409);
+  t.mock.timers.tick(1);
   assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken,choice:1})).status,200);
   assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken,choice:1})).status,200);
   assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken:otherToken,choice:0})).status,200);
   stage=(await post(env,`/api/rooms/${code}/state`,{playerToken})).data;
-  assert.ok(stage.me.score>=500 && stage.me.score<=1000);
+  assert.equal(stage.me.score,0);
+  assert.deepEqual(stage.me.answer,{choice:1});
+  assert.deepEqual(stage.leaderboard.map(p=>p.score),[0,0]);
   assert.equal(stage.submitted,2);
-  const points=stage.me.score;
   assert.equal((await post(env,`/api/rooms/${code}/action`,{hostToken,action:'reveal'})).status,409);
   t.mock.timers.tick(20_000);
   stage=(await post(env,`/api/rooms/${code}/state`,{playerToken})).data;
   assert.equal(stage.question.solution.answer,1);
-  assert.equal(stage.me.score,points);
+  const points=stage.me.score;
+  assert.equal(points,1000);
+  assert.equal(stage.resultsUntil-stage.serverNow,6_000);
+  assert.equal((await post(env,`/api/rooms/${code}/action`,{hostToken,action:'next'})).status,409);
+  t.mock.timers.tick(6_000);
   assert.equal((await post(env,`/api/rooms/${code}/action`,{hostToken,action:'next'})).status,200);
+  t.mock.timers.tick(3_000);
+  await post(env,`/api/rooms/${code}/state`,{playerToken:otherToken});
   assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken,choice:-1})).status,400);
   assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken,choice:0})).status,200);
   assert.equal((await post(env,`/api/rooms/${code}/answer`,{playerToken:otherToken,choice:2})).status,200);
@@ -89,6 +102,7 @@ test('full room lifecycle, timed reveals, avoid double points',async t=>{
   assert.equal(stage.question.solution.text,'None');
   assert.deepEqual(stage.me.answer,{choice:0,correct:false,points:0});
   assert.equal(stage.me.score,points);
+  t.mock.timers.tick(6_000);
   assert.equal((await post(env,`/api/rooms/${code}/action`,{hostToken,action:'next'})).status,200);
   assert.equal((await post(env,`/api/rooms/${code}/state`,{playerToken})).data.phase,'ended');
   assert.equal((await post(env,`/api/rooms/${code}/action`,{hostToken,action:'reset'})).status,200);
@@ -126,6 +140,7 @@ test('rankings expire offline players and only the host can kick during a quiz',
   await post(env,`${path}/state`,{playerToken:other.playerToken});
   assert.equal((await hostState()).data.count,2);
   await post(env,`${path}/action`,{hostToken,action:'start'});
+  t.mock.timers.tick(3_000);
   await post(env,`${path}/answer`,{playerToken,choice:1});
   const kick={action:'kick',playerId};
   assert.equal((await post(env,`${path}/action`,{hostToken:other.playerToken,...kick})).status,403);
@@ -139,7 +154,9 @@ test('rankings expire offline players and only the host can kick during a quiz',
   assert.equal(rejoin.data.playerId,playerId);
   assert.notEqual(rejoin.data.playerToken,playerToken);
   assert.equal((await post(env,`${path}/state`,{playerToken})).status,401);
-  assert.equal((await post(env,`${path}/state`,{playerToken:rejoin.data.playerToken})).data.me.score,1000);
+  const active=(await post(env,`${path}/state`,{playerToken:rejoin.data.playerToken})).data;
+  assert.equal(active.me.score,0);
+  assert.deepEqual(active.me.answer,{choice:1});
 });
 test('leaving hides only the authenticated player and polling again restores presence',async t=>{
   t.mock.timers.enable({apis:['Date'],now:100_000});
@@ -174,7 +191,7 @@ test('host can save reordered questions and media in an existing lobby',async t=
   const playing=(await post(env,`${path}/state`,{playerToken})).data;
   assert.equal(playing.question.q,'Trick');
   assert.equal(playing.question.media,media);
-  assert.equal(playing.deadline,110_000);
+  assert.equal(playing.deadline,113_000);
   assert.equal((await post(env,`${path}/quiz`,{hostToken,quiz})).status,409);
 });
 test('account rooms require their owner session and existing rooms can be claimed',async()=>{
@@ -217,6 +234,7 @@ test('40 guests can join, submit and read results in one room',async t=>{
   const guests=await Promise.all(Array.from({length:40},(_,i)=>post(env,`${path}/join`,{name:`Player ${i+1}`})));
   assert.ok(guests.every(result=>result.status===201));
   assert.equal((await post(env,`${path}/action`,{hostToken,action:'start'})).status,200);
+  t.mock.timers.tick(3_000);
   const submissions=await Promise.all(guests.map(({data:{playerToken}})=>post(env,`${path}/answer`,{playerToken,choice:1})));
   assert.ok(submissions.every(result=>result.status===200));
   t.mock.timers.tick(20_000);
@@ -231,6 +249,7 @@ test('only the host can finish early, closing answers and preserving scores',asy
   const path=`/api/rooms/${code}`;
   const {playerToken}=(await post(env,`${path}/join`,{name:'Nam'})).data;
   assert.equal((await post(env,`${path}/action`,{hostToken,action:'start'})).status,200);
+  t.mock.timers.tick(3_000);
   assert.equal((await post(env,`${path}/answer`,{playerToken,choice:1})).status,200);
   assert.equal((await post(env,`${path}/action`,{hostToken:playerToken,action:'end'})).status,403);
   assert.equal((await post(env,`${path}/action`,{hostToken,action:'end'})).status,200);
@@ -255,6 +274,7 @@ test('only the host can skip a live question and stale answers cannot land on th
   const skip={action:'skip',index:first.index,deadline:first.deadline};
   const answer={playerToken,choice:1,index:first.index,deadline:first.deadline};
   assert.equal((await post(env,`${path}/action`,{hostToken:playerToken,...skip})).status,403);
+  t.mock.timers.tick(3_000);
   assert.equal((await post(env,`${path}/answer`,answer)).status,200);
   t.mock.timers.tick(1_000);
   assert.equal((await post(env,`${path}/action`,{hostToken,...skip})).status,200);
@@ -263,11 +283,40 @@ test('only the host can skip a live question and stale answers cannot land on th
   const second=(await post(env,`${path}/state`,{playerToken})).data;
   assert.equal(second.phase,'question');
   assert.equal(second.index,1);
-  assert.equal(second.deadline,121_000);
-  assert.equal(second.me.score,1000);
+  assert.equal(second.deadline,127_000);
+  assert.equal(second.me.score,0);
   assert.equal(second.me.answer,null);
   assert.equal((await post(env,`${path}/action`,{hostToken,action:'skip',index:second.index,deadline:second.deadline})).status,200);
   const ended=(await post(env,`${path}/state`,{playerToken})).data;
   assert.equal(ended.phase,'ended');
   assert.equal(ended.me.score,1000);
+});
+
+test('a host can close the current question early, show scores, and reject unanswered late submissions',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:100_000});
+  const env=setup();
+  const {code,hostToken}=(await post(env,'/api/rooms',{quiz})).data;
+  const path=`/api/rooms/${code}`;
+  const first=(await post(env,`${path}/join`,{name:'An'})).data;
+  const second=(await post(env,`${path}/join`,{name:'Bình'})).data;
+  await post(env,`${path}/action`,{hostToken,action:'start'});
+  const active=(await post(env,`${path}/state`,{hostToken})).data;
+  const close={action:'close-question',index:active.index,deadline:active.deadline};
+  assert.equal((await post(env,`${path}/action`,{hostToken:second.playerToken,...close})).status,403);
+  assert.equal((await post(env,`${path}/action`,{hostToken,...close})).status,409);
+  t.mock.timers.tick(3_000);
+  assert.equal((await post(env,`${path}/answer`,{playerToken:first.playerToken,choice:1})).status,200);
+  assert.equal((await post(env,`${path}/action`,{hostToken,...close})).status,200);
+  assert.equal((await post(env,`${path}/answer`,{playerToken:second.playerToken,choice:1})).status,409);
+  const reveal=(await post(env,`${path}/state`,{playerToken:second.playerToken})).data;
+  assert.equal(reveal.phase,'reveal');
+  assert.equal(reveal.index,active.index);
+  assert.equal(reveal.question.solution.answer,1);
+  assert.equal(reveal.me.answer,null);
+  assert.deepEqual(reveal.leaderboard.map(p=>p.score),[1000,0]);
+  t.mock.timers.tick(5_999);
+  assert.equal((await post(env,`${path}/action`,{hostToken,action:'next'})).status,409);
+  t.mock.timers.tick(1);
+  assert.equal((await post(env,`${path}/action`,{hostToken,action:'next'})).status,200);
+  assert.equal((await post(env,`${path}/action`,{hostToken,...close})).status,409);
 });

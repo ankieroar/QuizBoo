@@ -1,14 +1,19 @@
-/* QuizBoo: một file JS thuần. Backend nằm trong src/worker.js. */
+import {setupSounds, setupStageZoom} from './room-effects.js';
+
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const esc = x => String(x ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 const state = {
   view: 'home', draft: null, selected: 0, files: new Map(), pendingRoom: null, editingRoom: null,
   role: null, code: '', hostToken: '', playerToken: '', room: null,
-  timer: null, poller: null, busy: false, roomSession: 0, stageKey: '', serverSkew: 0,
-  uploadCache: new Map(), account: { username:null, rooms:[] }, hostActionPending:null
+  timer: null, phaseTimer:null, poller: null, busy: false, pollQueued: false, roomSession: 0, stageKey: '', serverSkew: 0,
+  uploadCache: new Map(), account: { username:null, rooms:[] }, hostActionPending:null,
+  finalRanking:[], showFinalRanking:true, rankRows:new Map(), pendingAnswer:null
 };
-const symbols = ['▲','◆','●','■','✦','⬟','♥','⬢'];
+const sound = setupSounds($('#sound-toggle'));
+const resetStageZoom = setupStageZoom($('#stage-viewport'), $('#stage'));
+const symbols = 'ABCDEFGH';
+const quizText = value => esc(String(value ?? '').normalize('NFC'));
 const MAX_MEDIA_BYTES = 150 * 1024 * 1024;
 const SINGLE_UPLOAD_BYTES = 15 * 1024 * 1024;
 const mediaTypes = {png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',webp:'image/webp',gif:'image/gif',mp4:'video/mp4',webm:'video/webm',ogg:'video/ogg',ogv:'video/ogg'};
@@ -25,7 +30,11 @@ function toast(message, isError = false) {
 function setView(view) {
   for (const id of ['home','editor','room']) $('#' + id).hidden = id !== view;
   const previousView = state.view;
-  if (previousView === 'room' && view !== 'room') notifyPlayerLeft();
+  if (previousView === 'room' && view !== 'room') {
+    notifyPlayerLeft();
+    sound.stop();
+    resetStageZoom();
+  }
   state.view = view;
   if (view === 'home' && (previousView === 'room' || state.editingRoom)) history.replaceState({}, '', location.pathname);
   if (view === 'home') {
@@ -34,10 +43,10 @@ function setView(view) {
   }
   $('#top-home').hidden = view === 'home';
   if (view !== 'room') {
-    clearInterval(state.poller); clearInterval(state.timer); state.poller = null;
+    clearInterval(state.poller); clearInterval(state.timer); clearTimeout(state.phaseTimer); state.poller = null;
     state.roomSession++; state.busy = false;
   }
-  window.scrollTo({ top: 0, behavior: 'smooth' });
+  window.scrollTo({ top: 0, behavior: 'instant' });
 }
 function notifyPlayerLeft() {
   if (state.view !== 'room' || state.role !== 'player' || !state.playerToken) return;
@@ -128,13 +137,13 @@ function resolveMediaForPreview(s) {
 function isVideo(url, file) {
   return !!(fileMediaType(file).startsWith('video/') || /\.(?:mp4|webm|ogg|ogv)(?:\?.*)?$/i.test(url));
 }
-function mediaMarkup(src, className = 'question-media', selectedFile = null) {
+function mediaMarkup(src, className = 'question-media', selectedFile = null, eager = false) {
   const safe = resolveMediaForPreview(src);
   if (!safe) return '';
   if (isVideo(src, selectedFile || state.files.get(src))) {
     return `<video class="${className}" src="${esc(safe)}" controls playsinline preload="metadata"></video>`;
   }
-  return `<img class="${className}" src="${esc(safe)}" alt="Media của quiz" loading="lazy"/>`;
+  return `<img class="${className}" src="${esc(safe)}" alt="Media của quiz" loading="${eager?'eager':'lazy'}"/>`;
 }
 function renderPreview(slot, value) {
   const el = $(slot);
@@ -305,7 +314,13 @@ async function onImport(e) {
   const main = files.find(x=>/\.(json|csv)$/i.test(x.name));
   if (!main) return toast('Hãy chọn thêm file .json hoặc .csv.', true);
   try {
-    const text = await main.text(), imported = /\.csv$/i.test(main.name) ? parseCSV(text.replace(/^\uFEFF/,'')) : JSON.parse(text);
+    const bytes = new Uint8Array(await main.arrayBuffer());
+    const encoding = bytes[0]===0xff && bytes[1]===0xfe ? 'utf-16le'
+      : bytes[0]===0xfe && bytes[1]===0xff ? 'utf-16be' : 'utf-8';
+    let text;
+    try { text = new TextDecoder(encoding,{fatal:true}).decode(bytes); }
+    catch { throw Error('File sai mã hóa. Hãy lưu lại dưới dạng CSV UTF-8 hoặc JSON UTF-8.'); }
+    const imported = /\.csv$/i.test(main.name) ? parseCSV(text) : JSON.parse(text);
     const draft = importDraft(imported);
     const mediaFiles = new Map(files.filter(f=>f !== main).map(f=>[f.name.toLowerCase(),f]));
     function replaceMedia(path) {
@@ -456,10 +471,19 @@ async function copyText(value) {
 }
 async function connectRoom(code, role, secret) {
   clearInterval(state.poller); clearInterval(state.timer);
+  clearTimeout(state.phaseTimer);
   const session = ++state.roomSession;
   state.busy = false;
+  state.pollQueued = false;
   state.code=code; state.role=role; state.hostToken=role==='host'?secret:''; state.playerToken=role==='player'?secret:'';
   state.stageKey=''; state.room=null;
+  state.finalRanking=[];
+  state.showFinalRanking=true;
+  for (const {row} of state.rankRows.values()) row.remove();
+  state.rankRows.clear();
+  state.pendingAnswer=null;
+  $('#ranking-panel').hidden=true;
+  $('#host-actions').hidden=true;
   setView('room');
   history.replaceState({}, '', location.pathname + '?room=' + encodeURIComponent(code));
   $('#room-code').textContent=code;
@@ -479,16 +503,35 @@ async function connectRoom(code, role, secret) {
   state.timer=setInterval(updateTimer, 180);
   localStorage.setItem('tq-last-code', code);
 }
-async function poll() {
-  if (state.busy || state.view!=='room') return;
+async function poll(refreshAfterPending = false) {
+  if (state.view!=='room') return;
+  if (state.busy) {
+    if (refreshAfterPending) state.pollQueued=true;
+    return;
+  }
   const session = state.roomSession;
   state.busy=true;
   try {
+    const sentAt=performance.now();
     const d=await api(`/api/rooms/${state.code}/state`, state.role==='host'?{hostToken:state.hostToken}:{playerToken:state.playerToken});
+    const receivedAt=performance.now();
     if (session !== state.roomSession) return;
-    state.room=d; state.serverSkew=d.serverNow-Date.now();
+    const previous = state.room;
+    if (d.phase==='question' && previous?.phase==='question' && d.index===previous.index &&
+        d.deadline===previous.deadline && d.me && !d.me.answer && previous.me?.answer) {
+      d.me.answer=previous.me.answer;
+    }
+    if (d.phase==='ended' && previous?.phase!=='ended') {
+      state.finalRanking=d.leaderboard;
+      state.showFinalRanking=true;
+    }
+    state.room=d;
+    const serverReceivedAt=d.serverReceivedAt ?? d.serverNow;
+    state.serverSkew=(serverReceivedAt+d.serverNow-sentAt-receivedAt)/2;
     $('#connection-indicator').textContent='● Đã đồng bộ';
     renderRoom();
+    schedulePhaseBoundary(d);
+    playRoomResult(previous, d);
   } catch(e) {
     if (session !== state.roomSession) return;
     if (e.code === 'PLAYER_KICKED') {
@@ -499,37 +542,210 @@ async function poll() {
     }
     $('#connection-indicator').textContent='● Mất kết nối, đang thử lại...'; throw e;
   }
-  finally { if (session === state.roomSession) state.busy=false; }
+  finally {
+    if (session === state.roomSession) {
+      state.busy=false;
+      if (state.pollQueued) {
+        state.pollQueued=false;
+        pollSafe();
+      }
+    }
+  }
 }
 async function pollSafe() { try { await poll(); } catch(e) { console.warn(e.message); } }
-function timerLeft() { const d=state.room; return d && d.phase==='question' ? Math.max(0, d.deadline-(Date.now()+state.serverSkew)) : 0; }
+function playRoomResult(previous, room) {
+  if (!previous || document.hidden) return;
+  if (room.phase==='reveal' && (previous.phase!=='reveal' || previous.index!==room.index)) {
+    if (room.me?.answer?.correct) sound.play('correct','celebrate');
+    else if (room.me?.answer) sound.play('wrong');
+    else if (room.host) sound.play('celebrate');
+  }
+  const champion=state.finalRanking[0];
+  if (room.phase==='ended' && previous.phase!=='ended' && champion) {
+    sound.play(room.host || room.me?.id===champion.id ? 'victory' : 'defeat');
+  }
+}
+function serverClock() { return performance.now()+state.serverSkew; }
+function timerLeft(now = serverClock()) {
+  const d=state.room;
+  return d?.phase==='question' ? Math.max(0,d.deadline-now) : 0;
+}
+function schedulePhaseBoundary(d) {
+  clearTimeout(state.phaseTimer);
+  const boundary=d.phase==='question' ? d.startsAt : d.resultsUntil;
+  const delay=boundary-serverClock();
+  if (delay>0) state.phaseTimer=setTimeout(updateTimer,Math.ceil(delay));
+}
+function updateHostTiming(d, now) {
+  if (!d.host) return;
+  const pending=state.hostActionPending===state.roomSession;
+  const close=$('#host-close-question');
+  if (close) close.disabled=pending || now<d.startsAt || now>=d.deadline;
+  const next=$('#host-main-action');
+  if (d.phase==='reveal' && next) next.disabled=pending || now<d.resultsUntil;
+  if (d.phase==='question' && next) next.disabled=pending || now>=d.deadline;
+}
 function updateTimer() {
-  const d=state.room, bar=$('#timer-value'), label=$('#timer-label');
-  if (!d || d.phase!=='question'||!bar) return;
-  const ms=timerLeft(), total=(d.question?.time || 20)*1000;
-  bar.style.width=Math.max(0,100*ms/total)+'%';
-  if(label) label.textContent=Math.ceil(ms/1000)+'s';
+  const d=state.room;
+  if (document.hidden || !d || state.view!=='room') return;
+  const now=serverClock();
+  updateHostTiming(d,now);
+  if (d.phase==='reveal') {
+    const hold=Math.max(0,Math.ceil((d.resultsUntil-now)/1000));
+    setText($('#results-clock'),hold ? `Xem bảng điểm · ${hold} giây` : d.host ? '' : 'Chờ quản trò tiếp tục');
+    return;
+  }
+  if (d.phase!=='question') return;
+  const countdown=$('#question-countdown');
+  if (!countdown.hidden) {
+    const remaining=d.startsAt-now;
+    if (remaining>0) {
+      setText($('#countdown-number'),String(Math.min(3,Math.ceil(remaining/1000))));
+      setText($('#phase-badge'),'CHUẨN BỊ');
+      return;
+    }
+    countdown.hidden=true;
+    const content=$('#question-content');
+    content.inert=false;
+    content.classList.replace('is-preparing','is-opening');
+    setText($('#phase-badge'),phaseName(d.phase));
+    if (!d.host) renderActiveAnswer(d);
+  }
+  const ms=timerLeft(now), total=(d.question?.time || 20)*1000;
+  if (!ms && !$('#question-content').classList.contains('is-closed')) {
+    $('#question-content').classList.add('is-closed');
+    if (!d.host) renderActiveAnswer(d);
+  }
+  $('#timer-value').style.width=Math.min(100,100*ms/total)+'%';
+  setText($('#timer-label'),Math.ceil(ms/1000)+'s');
   const points=$('#available-points');
-  if(points) points.textContent=ms>0 ? Math.round(500+500*Math.min(1,ms/total)).toLocaleString('vi-VN')+'đ nếu đúng' : 'Hết giờ';
+  if(points && !points.hidden) setText(points,ms>0 ? Math.round(500+500*Math.min(1,ms/total)).toLocaleString('vi-VN')+'đ nếu đúng' : 'Hết giờ');
 }
 function phaseName(phase) { return ({lobby:'SẢNH CHỜ',question:'ĐANG CHƠI',reveal:'CÔNG BỐ',ended:'KẾT THÚC'})[phase] || '...'; }
 function renderRoom() {
   const d=state.room; if(!d) return;
-  $('#room-title').textContent=d.title;
-  $('#room-code').textContent=d.code;
-  $('#phase-badge').textContent=phaseName(d.phase);
-  $('#room-hint').textContent=({ lobby:'Mời bạn bè vào phòng rồi bắt đầu!', question:`Câu ${d.index+1}/${d.total} · Đã chốt ${d.submitted}/${d.count} người`, reveal:`Câu ${d.index+1}/${d.total} · Đáp án đã được công bố!`, ended:'Cùng xem kết quả chung cuộc!' })[d.phase];
-  $('#player-count').textContent=d.count+' online';
-  const leader=d.phase==='ended' ? d.leaderboard[0] : null;
-  const key=[d.phase,d.index,d.me?.answer?.choice ?? 'none',d.host?'host':'player',
-    d.phase==='lobby' ? d.count : '',leader?.id,leader?.score].join(':');
+  $('#room').dataset.phase=d.phase;
+  setText($('#room-title'),d.title.normalize('NFC'));
+  setText($('#room-code'),d.code);
+  setText($('#phase-badge'),d.phase==='question' && serverClock()<d.startsAt ? 'CHUẨN BỊ' : phaseName(d.phase));
+  setText($('#room-hint'),({ lobby:'Mời bạn bè vào phòng rồi bắt đầu!', question:`Câu ${d.index+1}/${d.total} · Đã chốt ${d.submitted}/${d.count} người`, reveal:`Câu ${d.index+1}/${d.total} · Đáp án đã được công bố!`, ended:'Cùng xem kết quả chung cuộc!' })[d.phase]);
+  const key=[d.phase,d.index,d.deadline,d.host?'host':'player',
+    d.phase==='lobby' ? d.count : ''].join(':');
   if(state.stageKey!==key) { state.stageKey=key; renderStage(d); }
+  if (d.phase==='question' && !d.host) renderActiveAnswer(d);
   renderRanking(d);
   renderHostActions(d);
   updateTimer();
 }
 function renderRanking(d) {
-  $('#rankings').innerHTML=d.leaderboard.length?d.leaderboard.map((p,i)=>`<div class="rank-row ${d.me?.id===p.id?'is-me':''}"><span class="rank-order">${i===0?'🥇':i===1?'🥈':i===2?'🥉':p.rank}</span><span class="rank-avatar">${esc((p.name||'?')[0].toUpperCase())}</span><span class="rank-name" title="${esc(p.name)}">${esc(p.name)}${d.me?.id===p.id?' (bạn)':''}</span><span class="rank-score">${p.score.toLocaleString('vi-VN')}đ</span>${d.host?`<button class="copy-mini" type="button" data-kick-player="${esc(p.id)}" aria-label="Mời ${esc(p.name)} ra khỏi phòng"${state.hostActionPending===state.roomSession?' disabled':''}>Kick</button>`:''}</div>`).join(''):'<div class="empty-rank">Chưa có người chơi online.</div>';
+  const ended=d.phase==='ended';
+  const final=ended && state.showFinalRanking;
+  const visible=!ended || final || d.host;
+  $('#ranking-panel').hidden=!visible;
+  $('#final-actions').hidden=!final;
+  $('#room-exit').hidden=final;
+  $('#show-final-ranking').hidden=!ended || final;
+  if (!visible) return;
+  const players=final ? state.finalRanking : d.leaderboard;
+  setText($('#ranking-title'),final ? 'Xếp hạng chung cuộc' : d.phase==='reveal' ? `Bảng điểm sau câu ${d.index+1}` : 'Bảng xếp hạng');
+  setText($('#player-count'),final ? `${players.length} người` : `${d.count} online`);
+  const list=$('#rankings');
+  const rows=state.rankRows;
+  const current=[...list.children].filter(row=>row.classList.contains('rank-row'));
+  const reordered=current.length!==players.length || players.some((p,i)=>rows.get(p.id)?.row!==current[i]);
+  const before=new Map();
+  let bounds;
+  if (reordered && current.length && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
+    bounds=list.getBoundingClientRect();
+    for (const row of current) {
+      const rect=row.getBoundingClientRect();
+      if (rect.bottom>bounds.top && rect.top<bounds.bottom) before.set(row,rect.top);
+    }
+    for (const entry of rows.values()) entry.motion?.cancel();
+  }
+
+  const ids=new Set(players.map(p=>p.id));
+  for (const [id,entry] of rows) {
+    if (!ids.has(id)) { entry.row.remove(); rows.delete(id); }
+  }
+  $('#empty-ranking').hidden=players.length!==0;
+  const canKick=d.host && !final;
+  const actionPending=state.hostActionPending===state.roomSession;
+  let cursor=$('#empty-ranking').nextSibling;
+  for (const p of players) {
+    const entry=rows.get(p.id) || makeRankRow(rows,p.id);
+    const mine=d.me?.id===p.id;
+    if (entry.player!==p.name || entry.mine!==mine) {
+      const name=p.name.normalize('NFC');
+      setText(entry.avatar,Array.from(name)[0]?.toUpperCase() || '?');
+      setText(entry.name,name+(mine?' (bạn)':''));
+      entry.name.title=name;
+      entry.kick.setAttribute('aria-label',`Mời ${name} ra khỏi phòng`);
+      entry.row.classList.toggle('is-me',mine);
+      entry.player=p.name;
+      entry.mine=mine;
+    }
+    if (p.rank!==entry.position) {
+      setText(entry.rank,['🥇','🥈','🥉'][p.rank-1] ?? String(p.rank));
+      entry.position=p.rank;
+    }
+    if (p.score!==entry.points) {
+      setText(entry.score,`${p.score.toLocaleString('vi-VN')}đ`);
+      entry.points=p.score;
+    }
+    if (entry.kick.hidden===canKick) entry.kick.hidden=!canKick;
+    if (entry.kick.disabled!==actionPending) entry.kick.disabled=actionPending;
+    if (reordered) {
+      if (entry.row!==cursor) list.insertBefore(entry.row,cursor);
+      cursor=entry.row.nextSibling;
+    }
+  }
+  if (!before.size) return;
+  const moves=[];
+  for (const entry of rows.values()) {
+    if (!before.has(entry.row)) continue;
+    const rect=entry.row.getBoundingClientRect();
+    const offset=before.get(entry.row)-rect.top;
+    if (Math.abs(offset)>1 && rect.bottom>bounds.top && rect.top<bounds.bottom) moves.push([entry,offset]);
+  }
+  for (const [entry,offset] of moves) {
+    entry.motion=entry.row.animate([{transform:`translateY(${offset}px)`},{transform:'translateY(0)'}],
+      {duration:480,easing:'cubic-bezier(.2,.75,.25,1)'});
+  }
+}
+function setText(element, value) {
+  if (element.textContent!==value) element.textContent=value;
+}
+function makeRankRow(rows, id) {
+  const row=document.createElement('div');
+  row.className='rank-row';
+  row.innerHTML='<span class="rank-order"></span><span class="rank-avatar" aria-hidden="true"></span><span class="rank-name"></span><span class="rank-score"></span><button class="copy-mini" type="button" hidden>Kick</button>';
+  const [rank,avatar,name,score,kick]=row.children;
+  kick.dataset.kickPlayer=id;
+  const entry={row,rank,avatar,name,score,kick};
+  rows.set(id,entry);
+  return entry;
+}
+const confetti = '<div class="confetti" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>';
+const fireworks = '<div class="fireworks" aria-hidden="true"><i></i><i></i><i></i></div>';
+
+function renderAnswerResult(room, solution) {
+  const answer = room.me?.answer;
+  const correct = answer?.correct;
+  const tone = answer ? (correct ? 'success' : 'wrong') : 'neutral';
+  const heading = answer
+    ? (correct ? 'Chính xác!' : 'Chưa đúng!')
+    : room.host ? 'Công bố đáp án' : 'Bạn chưa trả lời';
+  const detail = solution.type==='hidden' ? 'Đáp án ẩn' : 'Đáp án đúng';
+  return `<div class="result-card result-${tone}" role="status">
+    ${correct ? confetti : ''}
+    <span class="result-icon" aria-hidden="true">${answer ? (correct ? '✓' : '×') : '✦'}</span>
+    <div class="result-copy"><strong>${heading}</strong>
+      <span>${detail} · ${quizText(solution.text)}</span>
+      ${solution.explanation ? `<p>${quizText(solution.explanation)}</p>` : ''}
+    </div>
+    ${answer ? `<span class="result-points">+${answer.points.toLocaleString('vi-VN')} điểm</span>` : ''}
+  </div>`;
 }
 function renderStage(d) {
   const stage=$('#stage');
@@ -538,35 +754,57 @@ function renderStage(d) {
     return;
   }
   if(d.phase==='ended') {
-    const champion=d.leaderboard[0];
-    stage.innerHTML=`<div class="stage-end"><div class="trophy">🏆</div><h2>Game over. Vui hết nấc!</h2><p>Trận đấu đã kết thúc — cùng chúc mừng ngôi vương của hôm nay.</p><div class="winner">${champion?esc(champion.name)+' — '+champion.score.toLocaleString('vi-VN')+'đ':'Chưa có người chơi'}</div>${d.me?`<div class="feedback-box"><strong>Điểm của bạn: ${d.me.score.toLocaleString('vi-VN')}đ</strong></div>`:''}</div>`;
+    const champion=state.finalRanking[0];
+    const won=!!champion && d.me?.id===champion.id;
+    const celebration=won || (d.host && champion);
+    const title=won ? 'Bạn chiến thắng!' : d.me && champion ? 'Hẹn bạn ở trận sau!' : 'Quiz đã kết thúc';
+    stage.innerHTML=`<div class="stage-end result-card result-${celebration?'success':'neutral'}" role="status">
+      ${celebration?fireworks+confetti:''}
+      <div class="trophy" aria-hidden="true">${celebration?'🏆':'🏁'}</div>
+      <h2>${title}</h2>
+      ${champion ? `<div class="winner">Hạng nhất · ${quizText(champion.name)} · ${champion.score.toLocaleString('vi-VN')}đ</div>` : ''}
+      ${d.me ? `<p class="final-score">Điểm của bạn <strong>${d.me.score.toLocaleString('vi-VN')}đ</strong></p>` : ''}
+    </div>`;
     return;
   }
   const q=d.question, reveal=d.phase==='reveal', solution=q.solution, answer=d.me?.answer;
+  const preparing=!reveal && serverClock()<d.startsAt;
   const shownMedia=reveal?(solution?.media || q.media):q.media;
   const options=q.options.map((option,i)=>{
     const selected=answer?.choice===i, right=reveal && solution?.type==='normal' && solution.answer===i;
     const bad=reveal && selected && !right;
-    return `<button type="button" data-choice="${i}" class="answer-choice color-${i}${selected?' selected':''}${right?' correct-choice':''}${bad?' incorrect-choice':''}" ${d.host||reveal||answer?'disabled':''}><span class="shape">${symbols[i]}</span><span>${esc(option)}</span></button>`;
+    const mark=right ? '<span class="choice-mark"><span class="sr-only">Đáp án đúng</span>✓</span>'
+      : bad ? '<span class="choice-mark"><span class="sr-only">Bạn chọn sai</span>×</span>' : '';
+    return `<button type="button" data-choice="${i}" class="answer-choice color-${i}${selected?' selected':''}${right?' correct-choice':''}${bad?' incorrect-choice':''}" ${d.host||reveal||answer?'disabled':''}><span class="shape" aria-hidden="true">${symbols[i]}</span><span class="choice-text">${quizText(option)}</span>${mark}</button>`;
   }).join('');
-  let feedback='';
-  if(reveal) {
-    const text=solution.type==='hidden'?`🕵️ ĐÁP ÁN ẨN: ${solution.text}`:`✅ ĐÁP ÁN ĐÚNG: ${solution.text}`;
-    const own=solution.type==='hidden'?'<p>Không ai ghi điểm câu này.</p>':answer?`<p>${answer.correct?'🎉 Bạn trả lời đúng! +'+answer.points+' điểm':'😼 Tiếc rồi, bạn chưa ghi điểm câu này.'}</p>`:(d.host?'':'<p>Bạn không trả lời câu này.</p>');
-    feedback=`<div class="feedback-box"><strong>${esc(text)}</strong>${solution.explanation?`<p>${esc(solution.explanation)}</p>`:''}${own}</div>`;
-  } else if(answer) feedback='<div class="waiting-hint">✅ Đã chốt lựa chọn! Đáp án sẽ hiện khi hết giờ.</div>';
-  else if(d.host) feedback='<div class="waiting-hint">Bạn là quản trò — mọi người đang chọn đáp án.</div>';
-  else feedback='<div class="waiting-hint">Chọn một đáp án.</div>';
-  stage.innerHTML=`<div class="stage-header"><span>✦ CÂU ${d.index+1} / ${d.total}</span>${!reveal&&!answer?'<span id="available-points"></span>':''}<span id="timer-label">${q.time}s</span></div>
-    <div class="timer-track"><div id="timer-value"></div></div>
-    ${mediaMarkup(shownMedia, reveal?'reveal-media':'question-media')}
-    <h2 class="question-text">${esc(q.q)}</h2>
+  const hint=reveal ? '' : '<div class="waiting-hint">'+(d.host?'Người chơi đang chọn đáp án.':'Chọn một đáp án.')+'</div>';
+  stage.innerHTML=`${reveal ? '' : `<div id="question-countdown" class="question-countdown"${preparing?'':' hidden'}>
+    <p>Câu ${d.index+1} / ${d.total}</p><strong id="countdown-number">3</strong><p>Chuẩn bị trả lời</p>
+  </div>`}
+    <div id="question-content" class="question-content ${reveal?'is-revealing':preparing?'is-preparing':'is-opening'}"${preparing?' inert':''}>
+    <div class="stage-header"><span>✦ CÂU ${d.index+1} / ${d.total}</span>${!reveal?'<span id="available-points"></span>':'<span id="results-clock"></span>'}<span id="timer-label">${q.time}s</span></div>
+    ${reveal ? renderAnswerResult(d,solution) : '<div class="timer-track"><div id="timer-value"></div></div>'}
+    ${mediaMarkup(shownMedia,reveal?'reveal-media':'question-media',null,!reveal)}
+    <h2 class="question-text">${quizText(q.q)}</h2>
     <div class="answer-grid">${options}</div>
-    ${feedback}`;
-  if(!d.host && !reveal && !answer) {
+    ${hint}</div>`;
+  if(!d.host && !reveal) {
     $$('[data-choice]',stage).forEach(btn=>btn.onclick=()=>submitAnswer(Number(btn.dataset.choice)));
   }
   if(reveal) $('#timer-label').textContent='ĐÃ CÔNG BỐ';
+}
+function renderActiveAnswer(d) {
+  const choice=d.me?.answer?.choice;
+  const pending=state.pendingAnswer?.index===d.index && state.pendingAnswer?.deadline===d.deadline;
+  const expired=!timerLeft();
+  const locked=choice!==undefined || pending || serverClock()<d.startsAt || expired;
+  for (const button of $$('#stage [data-choice]')) {
+    if (button.disabled!==locked) button.disabled=locked;
+    button.classList.toggle('selected',Number(button.dataset.choice)===choice);
+  }
+  $('#available-points').hidden=choice!==undefined;
+  setText($('#stage .waiting-hint'),expired ? 'Hết giờ. Đang chờ kết quả.' :
+    choice===undefined ? 'Chọn một đáp án.' : 'Đã chốt lựa chọn. Đáp án sẽ hiện khi hết giờ.');
 }
 function renderHostActions(d) {
   const container=$('#host-actions');
@@ -575,18 +813,29 @@ function renderHostActions(d) {
   let label='',button='',act='';
   if(d.phase==='lobby') {label='Đang ở sảnh chờ';button='▶ Bắt đầu quiz';act='start';}
   else if(d.phase==='question') {
-    label=`Đã trả lời ${d.submitted}/${d.count} người · Đáp án sẽ hiện khi hết giờ`;
+    label=`Đã trả lời ${d.submitted}/${d.count} người`;
     button=d.index+1>=d.total?'Bỏ qua câu cuối':'Bỏ qua câu →';
     act='skip';
   }
   else if(d.phase==='reveal') {label=`Đã công bố câu ${d.index+1}`;button=d.index+1>=d.total?'🏁 Kết thúc':'Câu tiếp theo →';act='next';}
   else {label='Đã kết thúc trận';button='↺ Chơi lại';act='reset';}
   const editButton = d.phase === 'lobby' ? '<button class="button subtle" type="button" id="host-edit-quiz">Sửa bộ câu hỏi</button>' : '';
+  const closeButton = d.phase==='question'
+    ? '<button class="button close-question" type="button" id="host-close-question" title="Chốt lượt trả lời và công bố đáp án ngay">Kết thúc câu</button>' : '';
   const endButton = d.phase !== 'ended' && !(d.phase !== 'lobby' && d.index + 1 >= d.total)
-    ? '<button class="button subtle" type="button" id="host-end-room">Kết thúc ngay</button>' : '';
-  container.innerHTML=`<div><strong>🎛 Bảng điều khiển quản trò</strong><p>${esc(label)}</p></div>${editButton}${endButton}${act?`<button class="button primary" type="button" id="host-main-action">${button}</button>`:''}`;
-  if(state.hostActionPending === state.roomSession) $$('button',container).forEach(button=>button.disabled=true);
-  if(act) $('#host-main-action').onclick=()=>hostAction(act,act==='skip'?{index:d.index,deadline:d.deadline}:{});
+    ? '<button class="button subtle" type="button" id="host-end-room">Kết thúc trận</button>' : '';
+  const controlsKey=[d.phase,button].join(':');
+  if (container.dataset.controls!==controlsKey) {
+    container.dataset.controls=controlsKey;
+    container.innerHTML=`<div><strong>Điều khiển phòng</strong><p></p></div>${editButton}${endButton}${closeButton}${act?`<button class="button ${act==='skip'?'skip-question':'primary'}" type="button" id="host-main-action">${button}</button>`:''}`;
+  }
+  $('p',container).textContent=label;
+  const pending=state.hostActionPending===state.roomSession;
+  for (const control of $$('button',container)) control.disabled=pending;
+  updateHostTiming(d,serverClock());
+  const question={index:d.index,deadline:d.deadline};
+  if(act) $('#host-main-action').onclick=()=>hostAction(act,act==='skip'?question:{});
+  if(closeButton) $('#host-close-question').onclick=()=>hostAction('close-question',question);
   if(editButton) $('#host-edit-quiz').onclick=()=>openEditor(importDraft(d.hostQuiz), {code:d.code, hostToken:state.hostToken});
   if(endButton) $('#host-end-room').onclick=()=>{
     if(window.confirm('Kết thúc phòng ngay cho tất cả người chơi? Điểm hiện tại sẽ được giữ lại.')) hostAction('end');
@@ -601,8 +850,7 @@ async function hostAction(action, details = {}) {
   try {
     await api(`/api/rooms/${state.code}/action`,{hostToken:state.hostToken,action,...details});
     if(session !== state.roomSession) return;
-    state.stageKey='';
-    await poll();
+    await poll(true);
   } catch(e) {
     if(session === state.roomSession) toast(e.message,true);
   } finally {
@@ -615,18 +863,28 @@ async function hostAction(action, details = {}) {
 }
 async function submitAnswer(choice) {
   if(state.role!=='player' || state.room?.phase!=='question' || state.room?.me?.answer || timerLeft()<=0) return;
+  if (serverClock()<state.room.startsAt) return;
   const {index,deadline}=state.room, session=state.roomSession;
-  $$('.answer-choice', $('#stage')).forEach(b=>b.disabled=true);
+  if (state.pendingAnswer?.index===index && state.pendingAnswer?.deadline===deadline) return;
+  const attempt={index,deadline};
+  state.pendingAnswer=attempt;
+  renderActiveAnswer(state.room);
   try {
     await api(`/api/rooms/${state.code}/answer`,{playerToken:state.playerToken,choice,index,deadline});
     if(session!==state.roomSession || state.room?.phase!=='question' ||
        state.room.index!==index || state.room.deadline!==deadline) return;
     // Cho phản hồi tức thời, máy chủ vẫn tự tính điểm và xác minh đáp án.
-    state.room.me.answer={choice, correct:false, points:0}; state.stageKey=''; renderStage(state.room);
+    state.room.me.answer={choice};
+    renderActiveAnswer(state.room);
     await poll();
   } catch(e) {
     if(session!==state.roomSession) return;
-    toast(e.message,true);state.stageKey='';await pollSafe();
+    toast(e.message,true);await pollSafe();
+  } finally {
+    if (session===state.roomSession && state.pendingAnswer===attempt) {
+      state.pendingAnswer=null;
+      if (state.room?.phase==='question') renderActiveAnswer(state.room);
+    }
   }
 }
 function initRoom() {
@@ -689,7 +947,17 @@ function initRoom() {
     const player=state.room.leaderboard.find(p=>p.id===playerId);
     if (player && window.confirm(`Mời ${player.name} ra khỏi phòng?`)) hostAction('kick',{playerId});
   };
-  $('#room-exit').onclick=()=>setView('home');
+  $$('[data-room-exit]').forEach(button=>button.onclick=()=>setView('home'));
+  $('#stay-in-room').onclick=()=>{
+    state.showFinalRanking=false;
+    renderRanking(state.room);
+    $('#show-final-ranking').focus();
+  };
+  $('#show-final-ranking').onclick=()=>{
+    state.showFinalRanking=true;
+    renderRanking(state.room);
+    $('#ranking-title').focus();
+  };
   $('#join-code').oninput=e=>e.target.value=e.target.value.toUpperCase().replace(/[^A-Z2-9]/g,'').slice(0,6);
   $('#join-form').onsubmit=async e=>{
     e.preventDefault();

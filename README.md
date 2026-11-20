@@ -9,6 +9,7 @@ QuizBoo là trò chơi trắc nghiệm trực tuyến cho lớp học hoặc nh�
 - Bảng xếp hạng chỉ hiển thị người chơi đang online. Khi người chơi bấm **Về trang chủ**, bảng cập nhật ở lượt đồng bộ tiếp theo. Khi đóng tab, trình duyệt cũng thử báo rời phòng. Nếu mất kết nối, trạng thái tự hết hạn sau tối đa khoảng 45 giây tính từ lần ghi nhận gần nhất. Quản trò có thể kick người chơi, kết thúc phòng hoặc cho chơi lại. Người bị kick có thể mở lại phòng từ cùng trình duyệt bằng mã phòng và giữ điểm đã có.
 - Quản trò có thể đăng ký bằng tên người dùng và mật khẩu để mở lại phòng từ thiết bị khác. Phòng tạo khi chưa đăng nhập có thể gắn vào tài khoản từ trình duyệt đã tạo phòng. Tài khoản chưa hỗ trợ khôi phục mật khẩu.
 - Có thể dùng ảnh, GIF hoặc video cho câu hỏi và phần công bố đáp án.
+- Trên điện thoại, chụm hoặc tách hai ngón trên khu vực câu hỏi để đổi cỡ tạm thời. Khu vực này trở về cỡ mặc định khi thả tay. Có thể bật hoặc tắt âm thanh bằng nút **Âm thanh**. Trình duyệt bắt đầu phát âm thanh sau lần tương tác đầu tiên.
 
 ## Chạy trên máy
 
@@ -16,12 +17,13 @@ Cần Node.js 22 trở lên và npm. Từ thư mục dự án, chạy trong Powe
 
 ```powershell
 npm.cmd ci
-Copy-Item wrangler.example.jsonc wrangler.jsonc
 npm.cmd run db:local
 npm.cmd run dev
 ```
 
-Chỉ cần sao chép cấu hình ở lần đầu. Mở địa chỉ Wrangler in ra, thường là `http://localhost:8787`. Có thể dùng nút **Khám phá quiz mẫu** để tạo phòng thử. Dữ liệu thử lưu trong `.wrangler/`.
+Mở địa chỉ Wrangler in ra, thường là `http://localhost:8787`. Hai lệnh local dùng `wrangler.example.jsonc`, bắt buộc chạy local và lưu D1, R2 trong `.wrangler/local-test/`. Nếu đã từng chạy bản cũ, dữ liệu thử ở thư mục local cũ vẫn nằm riêng.
+
+Để thử R2, mở `/api/health` trên cùng cổng và kiểm tra `"r2":true`. Sau đó tạo phòng có ảnh hoặc video tải từ máy và mở câu hỏi để kiểm tra phát lại. Wrangler sẽ ghi file vào bucket mô phỏng `quizboo-media`. Có thể dùng chế độ mô phỏng điện thoại trong DevTools để thử giao diện và thao tác cảm ứng.
 
 Chạy kiểm thử bằng `npm.cmd run check`.
 

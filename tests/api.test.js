@@ -302,6 +302,7 @@ test('a host can close the current question early, show scores, and reject unans
   await post(env,`${path}/action`,{hostToken,action:'start'});
   const active=(await post(env,`${path}/state`,{hostToken})).data;
   const close={action:'close-question',index:active.index,deadline:active.deadline};
+  assert.equal(active.answerCounts,undefined);
   assert.equal((await post(env,`${path}/action`,{hostToken:second.playerToken,...close})).status,403);
   assert.equal((await post(env,`${path}/action`,{hostToken,...close})).status,409);
   t.mock.timers.tick(3_000);
@@ -313,6 +314,7 @@ test('a host can close the current question early, show scores, and reject unans
   assert.equal(reveal.index,active.index);
   assert.equal(reveal.question.solution.answer,1);
   assert.equal(reveal.me.answer,null);
+  assert.deepEqual(reveal.answerCounts,[0,1]);
   assert.deepEqual(reveal.leaderboard.map(p=>p.score),[1000,0]);
   t.mock.timers.tick(5_999);
   assert.equal((await post(env,`${path}/action`,{hostToken,action:'next'})).status,409);

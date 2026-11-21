@@ -165,6 +165,15 @@ async function snapshot(db, room, credentials, request, requestTime) {
   const q = idx >= 0 ? quiz.questions[idx] : null;
   const answer = player && idx >= 0 ? await db.prepare('SELECT choice, is_correct, points FROM answers WHERE room_code=? AND player_id=? AND question_index=?')
     .bind(room.code, player.id, idx).first() : null;
+  let answerCounts;
+  if (phase==='reveal' && q) {
+    const votes = await db.prepare('SELECT choice, COUNT(*) AS total FROM answers WHERE room_code=? AND question_index=? GROUP BY choice')
+      .bind(room.code,idx).all();
+    answerCounts=q.options.map(()=>0);
+    for (const {choice,total} of votes.results) {
+      if (choice>=0 && choice<answerCounts.length) answerCounts[choice]=total;
+    }
+  }
   const data = {
     code: room.code, title: room.title, phase, index: idx,
     total: quiz.questions.length, count: all.length,
@@ -173,6 +182,7 @@ async function snapshot(db, room, credentials, request, requestTime) {
     resultsUntil: phase==='reveal' ? room.updated_at + RESULTS_HOLD_MS : 0,
     serverReceivedAt: requestTime, serverNow: Date.now(),
     question: q && phase !== 'ended' ? publicQuestion(q, phase === 'reveal') : null,
+    answerCounts,
     leaderboard: all.map((p, i) => ({ id: p.id, name: p.name, score: p.score, rank: i + 1 })),
     me: player ? { id: player.id, name: player.name, score: player.score,
       answer: answer ? (phase==='question' ? {choice:answer.choice}

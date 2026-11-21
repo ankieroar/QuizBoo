@@ -840,12 +840,27 @@ function renderStage(d) {
   const q=d.question, reveal=d.phase==='reveal', solution=q.solution, answer=d.me?.answer;
   const preparing=!reveal && serverClock()<d.startsAt;
   const shownMedia=reveal?(solution?.media || q.media):q.media;
+  const counts=reveal && Array.isArray(d.answerCounts) ? d.answerCounts : null;
+  const totalVotes=counts?.reduce((total,count)=>total+count,0) ?? 0;
   const options=q.options.map((option,i)=>{
     const selected=answer?.choice===i, right=reveal && solution?.type==='normal' && solution.answer===i;
     const bad=reveal && selected && !right;
     const mark=right ? '<span class="choice-mark"><span class="sr-only">Đáp án đúng</span>✓</span>'
       : bad ? '<span class="choice-mark"><span class="sr-only">Bạn chọn sai</span>×</span>' : '';
-    return `<button type="button" data-choice="${i}" class="answer-choice color-${i}${selected?' selected':''}${right?' correct-choice':''}${bad?' incorrect-choice':''}" ${d.host||reveal||answer?'disabled':''}><span class="shape" aria-hidden="true">${symbols[i]}</span><span class="choice-text">${quizText(option)}</span>${mark}</button>`;
+    const classes=`answer-choice color-${i}${selected?' selected':''}${right?' correct-choice':''}${bad?' incorrect-choice':''}`;
+    const label=`<span class="shape">${symbols[i]}</span><span class="choice-text">${quizText(option)}</span>${mark}`;
+    if (reveal) {
+      const count=counts?.[i] ?? 0;
+      const share=totalVotes ? 100*count/totalVotes : 0;
+      return `<div class="${classes} answer-result" role="listitem">
+        <div class="answer-result-label">${label}</div>
+        ${counts ? `<div class="vote-result">
+          <div class="vote-track" aria-hidden="true"><span style="--vote-share:${share}%"></span></div>
+          <span class="vote-count">${count.toLocaleString('vi-VN')} lượt chọn</span>
+        </div>` : ''}
+      </div>`;
+    }
+    return `<button type="button" data-choice="${i}" class="${classes}" ${d.host||answer?'disabled':''}>${label}</button>`;
   }).join('');
   const hint=reveal ? '' : '<div class="waiting-hint">'+(d.host?'Người chơi đang chọn đáp án.':'Chọn một đáp án.')+'</div>';
   stage.innerHTML=`${reveal ? '' : `<div id="question-countdown" class="question-countdown"${preparing?'':' hidden'}>
@@ -856,7 +871,8 @@ function renderStage(d) {
     ${reveal ? renderAnswerResult(d,solution) : '<div class="timer-track"><div id="timer-value"></div></div>'}
     ${mediaMarkup(shownMedia,reveal?'reveal-media':'question-media',null,!reveal)}
     <h2 class="question-text">${quizText(q.q)}</h2>
-    <div class="answer-grid">${options}</div>
+    ${counts ? `<div class="vote-heading"><h3>Lượt chọn theo đáp án</h3><span>${totalVotes.toLocaleString('vi-VN')} đã trả lời</span></div>` : ''}
+    <div class="answer-grid"${reveal?' role="list" aria-label="Kết quả theo đáp án"':''}>${options}</div>
     ${hint}</div>`;
   bindVideoSound(stage);
   if (!preparing) startStageVideo();

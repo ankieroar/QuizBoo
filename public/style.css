@@ -186,6 +186,17 @@ html { scroll-behavior: auto; -webkit-text-size-adjust: 100%; text-size-adjust: 
 .answer-choice.correct-choice { color: #135e32; background: #cbf5d7; outline: 2px solid #278149; outline-offset: 2px; }
 .answer-choice.incorrect-choice { color: #8c253a; background: #ffe2e6; outline: 2px solid #b73851; outline-offset: 2px; filter: none; }
 .choice-mark { font-size: 1.3rem; flex: none; }
+.vote-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 12px; margin: 0 0 12px; }
+.vote-heading h3 { margin: 0; font-size: 1rem; }
+.vote-heading > span, .vote-count { font-size: .875rem; font-variant-numeric: tabular-nums; }
+.vote-heading > span { color: #534875; }
+.answer-result { display: grid; align-content: start; gap: 12px; grid-template-columns: minmax(0,1fr); }
+.answer-result-label, .vote-result { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.vote-track { flex: 1; min-width: 20px; height: 7px; background: #ffffffa8; border-radius: 10px; overflow: hidden; }
+.vote-track > span { display: block; width: var(--vote-share); height: 100%; border-radius: inherit; background: currentColor; transform-origin: left; animation: vote-fill .65s ease-out both; }
+.vote-count { white-space: nowrap; }
+@keyframes vote-fill { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+@media (prefers-reduced-motion: reduce) { .vote-track > span { animation: none; } }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
 .result-card {

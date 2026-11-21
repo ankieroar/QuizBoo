@@ -53,6 +53,10 @@ function setView(view) {
   for (const id of ['home','editor','room']) $('#' + id).hidden = id !== view;
   const previousView = state.view;
   if (previousView === 'room' && view !== 'room') {
+    if (state.role==='player' && state.room?.me) {
+      $('#join-code').value=state.code;
+      $('#join-name').value=state.room.me.name;
+    }
     notifyPlayerLeft();
     sound.stop();
     $('#stage video')?.pause();

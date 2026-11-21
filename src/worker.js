@@ -278,9 +278,9 @@ async function routeApi(request, env, url) {
       if (existing?.kicked) {
         const secret = token();
         const [updated] = await env.DB.batch([
-          env.DB.prepare(`UPDATE players SET player_token=? WHERE id=? AND player_token=?
+          env.DB.prepare(`UPDATE players SET player_token=?,name=? WHERE id=? AND player_token=?
             AND EXISTS (SELECT 1 FROM player_presence WHERE player_id=players.id AND kicked=1)`)
-            .bind(secret,existing.id,data.playerToken),
+            .bind(secret,name,existing.id,data.playerToken),
           env.DB.prepare(`UPDATE player_presence SET kicked=0,last_seen=? WHERE player_id=?
             AND EXISTS (SELECT 1 FROM players WHERE id=player_presence.player_id AND player_token=?)`)
             .bind(now,existing.id,secret)
@@ -288,11 +288,17 @@ async function routeApi(request, env, url) {
         if (!updated.meta.changes) throw new HttpError('Phiên tham gia đã thay đổi. Hãy thử lại.', 409);
         return json({ playerToken: secret, playerId: existing.id });
       }
-      if (room.phase !== 'lobby') throw new HttpError('Phòng đã bắt đầu. Vui lòng chờ phòng mới.', 409);
       if (existing) {
+        if (existing.name!==name) {
+          const updated=await env.DB.prepare(`UPDATE players SET name=? WHERE id=? AND player_token=?
+            AND NOT EXISTS (SELECT 1 FROM player_presence WHERE player_id=players.id AND kicked=1)`)
+            .bind(name,existing.id,data.playerToken).run();
+          if (!updated.meta.changes) throw new HttpError('Phiên tham gia đã thay đổi. Hãy thử lại.', 409);
+        }
         await recordPresence(env.DB, existing.id, data.playerToken, now);
         return json({ playerToken: data.playerToken, playerId: existing.id });
       }
+      if (room.phase !== 'lobby') throw new HttpError('Phòng đã bắt đầu. Vui lòng chờ phòng mới.', 409);
       const id = crypto.randomUUID(), secret = token();
       const [insert] = await env.DB.batch([
         env.DB.prepare(`INSERT INTO players(id,room_code,player_token,name,score,joined_at)

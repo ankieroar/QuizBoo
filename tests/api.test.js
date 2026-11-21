@@ -149,14 +149,35 @@ test('rankings expire offline players and only the host can kick during a quiz',
   assert.equal((await hostState()).data.submitted,0);
   assert.equal((await post(env,`${path}/state`,{playerToken})).data.code,'PLAYER_KICKED');
   assert.equal((await post(env,`${path}/answer`,{playerToken,choice:0})).status,403);
-  const rejoin=await post(env,`${path}/join`,{name:'Nam',playerToken});
+  const rejoin=await post(env,`${path}/join`,{name:'Tên mới',playerToken});
   assert.equal(rejoin.status,200);
   assert.equal(rejoin.data.playerId,playerId);
   assert.notEqual(rejoin.data.playerToken,playerToken);
   assert.equal((await post(env,`${path}/state`,{playerToken})).status,401);
   const active=(await post(env,`${path}/state`,{playerToken:rejoin.data.playerToken})).data;
   assert.equal(active.me.score,0);
+  assert.equal(active.me.name,'Tên mới');
   assert.deepEqual(active.me.answer,{choice:1});
+});
+
+test('rejoining with a new name keeps the player and submitted answer',async t=>{
+  t.mock.timers.enable({apis:['Date'],now:100_000});
+  const env=setup();
+  const {code,hostToken}=(await post(env,'/api/rooms',{quiz})).data;
+  const path=`/api/rooms/${code}`;
+  const original=(await post(env,`${path}/join`,{name:'3'})).data;
+  await post(env,`${path}/action`,{hostToken,action:'start'});
+  t.mock.timers.tick(3_000);
+  await post(env,`${path}/answer`,{playerToken:original.playerToken,choice:1});
+  const renamed=await post(env,`${path}/join`,{name:' abc ',playerToken:original.playerToken});
+  assert.equal(renamed.status,200);
+  assert.deepEqual(renamed.data,original);
+  t.mock.timers.tick(20_000);
+  const result=(await post(env,`${path}/state`,{playerToken:original.playerToken})).data;
+  assert.equal(result.me.name,'abc');
+  assert.equal(result.me.score,1000);
+  assert.equal(result.me.answer.choice,1);
+  assert.deepEqual(result.leaderboard.map(p=>p.name),['abc']);
 });
 test('leaving hides only the authenticated player and polling again restores presence',async t=>{
   t.mock.timers.enable({apis:['Date'],now:100_000});
